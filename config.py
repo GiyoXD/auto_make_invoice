@@ -1,5 +1,3 @@
-# --- START OF FILE config.py ---
-
 # --- File Configuration ---
 INPUT_EXCEL_FILE = "test.xlsx" # Or specific name for this format
 # Specify sheet name, or None to use the active sheet
@@ -8,59 +6,63 @@ SHEET_NAME = None
 
 # --- Sheet Parsing Configuration ---
 # Row/Column range to search for the header
-HEADER_SEARCH_ROW_RANGE = 25
-HEADER_SEARCH_COL_RANGE = 25
+HEADER_SEARCH_ROW_RANGE = 50 # Increased range slightly, adjust if headers can be lower
+HEADER_SEARCH_COL_RANGE = 30 # Increased range slightly, adjust if many columns
 # A pattern (string or regex) to identify a cell within the header row
-# Updated pattern based on the SECOND header image
-HEADER_IDENTIFICATION_PATTERN = r"批次号|订单号|物料代码|总张数|净重|毛重" # Adjusted pattern slightly
+# This pattern helps find *any* header row, the mapping below specifies exact matches
+HEADER_IDENTIFICATION_PATTERN = r"批次号|订单号|物料代码|总张数|净重|毛重|po|item|pcs|net|gross" # Broadened slightly
 
-# Column mapping: Canonical Name -> List of possible header texts found in Excel (lowercase)
-# Incorporating headers from BOTH images where possible, prioritizing user's core needs.
+# --- Column Mapping Configuration ---
+# Canonical Name -> List containing ONLY the primary English and primary Chinese header text.
+# The script will perform a case-insensitive match against these specific terms.
+# Choose the MOST COMMON term found in your Excel files for each language.
 TARGET_HEADERS_MAP = {
-    # --- Canonical Names Required by User (Core Logic) ---
-    "po": ["po", "po no", "purchase order", "订单号"], # "订单号" present in both
-    "item": ["item", "item no", "料号", "产品编号", "物料代码"], # "物料代码" from 2nd image is key
-    "pcs": ["pcs", "张数", "数量", "qty", "件数", "总张数"], # Includes "总张数" (Total Sheets) from 2nd image. This is now likely the BASIS.
-                                                            # Removed "出货数量 (sf)" from this mapping.
-    "net": ["net", "net wt", "net weight", "净重"], # "净重" present in both
-    "gross": ["gross", "gross wt", "gross weight", "毛重"], # "毛重" present in both
-    "unit": ["unit", "unit price", "单价", "价格", "usd"], # Assuming 2nd 'USD' col is unit price
-    "sqft": ["sqft", "出货数量 (sf)"], # Added new canonical name 'sqft' mapped to "出货数量 (sf)"
+    # --- Core Logic Canonical Names ---
+    "po": ["po", "订单号"],                 # Primary English: 'po', Primary Chinese: '订单号'
+    "item": ["item no", "物料代码"],        # Primary English: 'item no', Primary Chinese: '物料代码'
+    "pcs": ["pcs", "总张数"],                # Primary English: 'pcs', Primary Chinese: '总张数'
+    "net": ["net weight", "净重", "net"],          # Primary English: 'net weight', Primary Chinese: '净重'
+    "gross": ["gross weight", "毛重", "gross"],       # Primary English: 'gross weight', Primary Chinese: '毛重'
+    "unit": ["unit price", "单价"],          # Primary English: 'unit price', Primary Chinese: '单价'
+    "sqft": ["sqft", "出货数量 (sf)"],      # Primary English: 'sqft', Primary Chinese: '出货数量 (sf)' (Assuming this specific text)
 
-    # --- Canonical names required by user, but less certain based on headers ---
-    "cbm": ["cbm", "meas", "measurement", "材积", "量码版"], # "量码版" is a possible but uncertain match
-    "desc": ["desc", "description", "品名规格"], # No clear header in either image
-    "inv_no": ["inv no", "invoice no", "发票号码"], # No clear header in either image
-    "inv_date": ["inv date", "invoice date", "发票日期"], # No clear header in either image
+    # --- Less Certain Canonical Names ---
+    "cbm": ["cbm", "材积"],                # Primary English: 'cbm', Primary Chinese: '材积' (Verify '材积' is correct/common)
+    "desc": ["description", "品名规格"],      # Primary English: 'description', Primary Chinese: '品名规格'
+    "inv_no": ["invoice no", "发票号码"],    # Primary English: 'invoice no', Primary Chinese: '发票号码'
+    "inv_date": ["invoice date", "发票日期"], # Primary English: 'invoice date', Primary Chinese: '发票日期'
 
-    # --- Other Headers Found (Mapped to Consistent or New Canonical Names) ---
-    "batch_no": ["批次号", "batch number"], # Added from 2nd image
-    "line_no": ["行号", "line number", "line no"], # Added from 2nd image
-    "direction": ["内向", "direction", "inward"], # Added from 2nd image (meaning unclear)
-    "production_date": ["生产日期", "production date"], # Added from 2nd image
-    "production_order_no": ["生产单号", "production order number"], # Present in both, potentially different types
-    "reference_code": ["jlf/ttx编号", "ttx编号", "reference code"], # Combined codes from both images
-    "level": ["级别", "等级", "level", "grade"], # Combined level/grade from both images
-    "pallet_count": ["拖数", "pallet count"], # Renamed from towel_count based on likely meaning
-    "manual_no": ["手册号", "manual number"], # From 1st image
-    "remarks": ["备注", "remarks", "notes"], # Present in both
-    "amount": ["金额", "amount"], # From 1st image
+    # --- Other Found Headers ---
+    "batch_no": ["batch number", "批次号"],  # Primary English: 'batch number', Primary Chinese: '批次号'
+    "line_no": ["line no", "行号"],           # Primary English: 'line no', Primary Chinese: '行号'
+    "direction": ["direction", "内向"],      # Primary English: 'direction', Primary Chinese: '内向' (Meaning still unclear)
+    "production_date": ["production date", "生产日期"], # Primary English: 'production date', Primary Chinese: '生产日期'
+    "production_order_no": ["production order number", "生产单号"], # Primary English: 'production order number', Primary Chinese: '生产单号'
+    "reference_code": ["reference code", "ttx编号"], # Primary English: 'reference code', Primary Chinese: 'ttx编号' (Verify 'ttx编号')
+    "level": ["grade", "等级"],              # Primary English: 'grade', Primary Chinese: '等级'
+    "pallet_count": ["pallet count", "拖数"],# Primary English: 'pallet count', Primary Chinese: '拖数'
+    "manual_no": ["manual number", "手册号"], # Primary English: 'manual number', Primary Chinese: '手册号'
+    "remarks": ["remarks", "备注"],          # Primary English: 'remarks', Primary Chinese: '备注'
+    "amount": ["amount", "金额"],            # Primary English: 'amount', Primary Chinese: '金额'
 
-    # Removed "shipping_qty_sf" as it's now "sqft"
+    # Add any other essential headers here following the [primary_english, primary_chinese] format
+    # If a header only exists in one language in your files, you can use:
+    # "some_header": ["only english term"]
+    # "another_header": ["只有中文"]
 }
 
 # --- Data Extraction Configuration ---
-# 'item' (mapped from 物料代码 in 2nd image) still seems like a good choice.
+# 'item' still seems like a reasonable choice to signal the start/end of data rows.
 STOP_EXTRACTION_ON_EMPTY_COLUMN = 'item'
-# Safety limit for the number of data rows to read below the header
+# Safety limit for the number of data rows to read below the header within a table
 MAX_DATA_ROWS_TO_SCAN = 1000
 
 # --- Data Processing Configuration ---
 # List of canonical header names for columns where values should be distributed
-COLUMNS_TO_DISTRIBUTE = ["net", "gross"] # Still likely just these two. 'cbm' is uncertain.
+# CBM processing/distribution depends on the 'cbm' mapping above and if the column contains L*W*H strings
+COLUMNS_TO_DISTRIBUTE = ["net", "gross", "cbm"] # Include 'cbm' if you want to distribute calculated CBM values
 
-# The canonical header name of the column used for proportional distribution (e.g., quantity)
-# Reverted to 'pcs' which maps to "总张数" (Total Sheets), assuming this is the quantity basis.
+# The canonical header name of the column used for proportional distribution
 DISTRIBUTION_BASIS_COLUMN = "pcs"
 
-# --- END OF FILE config.py ---
+# --- END OF UPDATED FILE config.py ---

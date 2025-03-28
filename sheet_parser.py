@@ -1,4 +1,4 @@
-# --- START OF FILE sheet_parser.py ---
+# --- START OF FULL FILE: sheet_parser.py ---
 
 import re
 import logging
@@ -12,144 +12,208 @@ from config import (
     HEADER_IDENTIFICATION_PATTERN,
     STOP_EXTRACTION_ON_EMPTY_COLUMN,
     MAX_DATA_ROWS_TO_SCAN,
-    # --- ADDED MISSING IMPORTS ---
-    DISTRIBUTION_BASIS_COLUMN,
-    COLUMNS_TO_DISTRIBUTE
-    # -----------------------------
+    DISTRIBUTION_BASIS_COLUMN, # Ensure these are available
+    COLUMNS_TO_DISTRIBUTE     # Ensure these are available
 )
 
-def find_header_row(sheet, search_pattern, row_range, col_range) -> Optional[int]:
+def find_all_header_rows(sheet, search_pattern, row_range, col_range) -> List[int]:
     """
-    Finds the 1-indexed row number containing a header based on a pattern.
+    Finds all 1-indexed row numbers containing a header based on a pattern.
+    Returns a list of row numbers, sorted in ascending order.
     """
+    header_rows: List[int] = []
     try:
+        # Compile the regex pattern once
         regex = re.compile(search_pattern, re.IGNORECASE)
-        max_row = min(row_range, sheet.max_row)
-        max_col = min(col_range, sheet.max_column)
+        # Determine search boundaries, ensuring they don't exceed sheet dimensions
+        max_row_to_search = min(row_range, sheet.max_row)
+        max_col_to_search = min(col_range, sheet.max_column)
 
-        for r_idx in range(1, max_row + 1):
-            for c_idx in range(1, max_col + 1):
+        logging.info(f"Searching for headers using pattern '{search_pattern}' in rows 1-{max_row_to_search}, cols 1-{max_col_to_search}")
+
+        # Iterate through the specified range to find header cells
+        for r_idx in range(1, max_row_to_search + 1):
+            # Optimization: Check only necessary columns if pattern is specific
+            for c_idx in range(1, max_col_to_search + 1):
                 cell = sheet.cell(row=r_idx, column=c_idx)
                 if cell.value is not None:
                     cell_value_str = str(cell.value).strip()
+                    # If the cell content matches the pattern, consider this a header row
                     if regex.search(cell_value_str):
-                        logging.info(f"Header pattern '{search_pattern}' found in cell {cell.coordinate} (Row: {r_idx}).")
-                        return r_idx
-        logging.warning(f"Header pattern '{search_pattern}' not found within search range (Rows: 1-{max_row}, Cols: 1-{max_col}).")
-        return None
+                        logging.debug(f"Header pattern found in cell {cell.coordinate} (Row: {r_idx}). Adding row to list.")
+                        header_rows.append(r_idx)
+                        # Once a header is found in a row, move to the next row
+                        break
+
+        # Sort the found header rows
+        header_rows.sort()
+
+        if not header_rows:
+            logging.warning(f"Header pattern '{search_pattern}' not found within the search range.")
+        else:
+            logging.info(f"Found {len(header_rows)} potential header rows at: {header_rows}")
+
+        return header_rows
     except Exception as e:
-        logging.error(f"Error finding header row: {e}", exc_info=True)
-        return None
+        logging.error(f"Error finding header rows: {e}", exc_info=True)
+        return []
 
 def map_columns_to_headers(sheet, header_row: int, col_range: int) -> Dict[str, int]:
     """
-    Maps canonical header names to their 1-indexed column numbers based on the header row content.
+    Maps canonical header names to their 1-indexed column numbers based on the
+    header row content, prioritizing the first match found based on TARGET_HEADERS_MAP order.
+    (Uses the variation -> canonical lookup for clarity)
+
+    Args:
+        sheet: The openpyxl worksheet object.
+        header_row: The 1-indexed row number containing the headers.
+        col_range: The maximum number of columns to search for headers.
+
+    Returns:
+        A dictionary mapping canonical names (str) to column indices (int).
     """
     if header_row is None or header_row < 1:
+        logging.error("Invalid header_row provided for column mapping.")
         return {}
 
     column_mapping: Dict[str, int] = {}
-    found_canonical_headers = set()
+    processed_canonicals = set() # Track canonical names already assigned to a column
     max_col_to_check = min(col_range, sheet.max_column)
 
-    logging.info(f"Mapping columns in header row {header_row} up to column {max_col_to_check}.")
+    logging.info(f"Mapping columns based on header row {header_row} up to column {max_col_to_check}.")
 
+    # Build a reverse lookup: lowercase variation -> canonical name
+    variation_to_canonical_lookup: Dict[str, str] = {}
+    ambiguous_variations = set()
+    for canonical_name, variations in TARGET_HEADERS_MAP.items():
+        for variation in variations:
+            variation_lower = str(variation).lower().strip()
+            if not variation_lower: continue
+
+            if variation_lower in variation_to_canonical_lookup and variation_to_canonical_lookup[variation_lower] != canonical_name:
+                 if variation_lower not in ambiguous_variations:
+                      logging.warning(f"Config Issue: Header variation '{variation_lower}' mapped to multiple canonical names ('{variation_to_canonical_lookup[variation_lower]}', '{canonical_name}', etc.). Check TARGET_HEADERS_MAP.")
+                      ambiguous_variations.add(variation_lower)
+            variation_to_canonical_lookup[variation_lower] = canonical_name
+
+    # Iterate through Excel columns and map using the lookup
     for col_idx in range(1, max_col_to_check + 1):
         cell = sheet.cell(row=header_row, column=col_idx)
-        actual_header_text = str(cell.value).strip().lower() if cell.value is not None else ""
+        actual_header_text = str(cell.value).lower().strip() if cell.value is not None else ""
 
         if not actual_header_text:
             continue
 
-        # Find the best match in TARGET_HEADERS_MAP
-        best_match_canonical = None
-        for canonical_name, variations in TARGET_HEADERS_MAP.items():
-            # Optimization: Check if we already found this canonical name
-            if canonical_name in column_mapping: # Check column_mapping instead of found_canonical_headers for stricter single mapping
-                continue
+        matched_canonical = variation_to_canonical_lookup.get(actual_header_text)
 
-            if actual_header_text in variations:
-                 best_match_canonical = canonical_name
-                 break # Found a match for this cell
-
-        if best_match_canonical:
-             # Check if this column index is already mapped to something else (less likely but possible)
-             # This check is less crucial than checking if the canonical name is already mapped.
-             # if col_idx in column_mapping.values():
-             #    logging.warning(f"Column index {col_idx} is already mapped. Check header mapping logic.")
-
-             column_mapping[best_match_canonical] = col_idx
-             # found_canonical_headers.add(best_match_canonical) # Not strictly needed if checking column_mapping above
-             logging.info(f"Mapped column {col_idx} ('{cell.value}') -> '{best_match_canonical}'")
+        if matched_canonical:
+            if matched_canonical not in processed_canonicals:
+                column_mapping[matched_canonical] = col_idx
+                processed_canonicals.add(matched_canonical)
+                logging.info(f"Mapped column {col_idx} ('{cell.value}') -> '{matched_canonical}'")
+            else:
+                logging.warning(f"Duplicate Header/Mapping: Canonical name '{matched_canonical}' (from Excel header '{cell.value}' in Col {col_idx}) was already mapped to Col {column_mapping.get(matched_canonical)}. Ignoring this duplicate column.")
 
     if not column_mapping:
-        logging.warning(f"No target headers found or mapped in row {header_row}.")
+        logging.warning(f"No target headers were successfully mapped in row {header_row}. Check Excel headers and TARGET_HEADERS_MAP.")
     else:
-        # Verify essential columns are mapped (optional but recommended)
-        # This check now uses the imported variables
-        required = {DISTRIBUTION_BASIS_COLUMN} | set(COLUMNS_TO_DISTRIBUTE)
+        # Verify essential columns needed for later processing are mapped
+        required = set()
+        if DISTRIBUTION_BASIS_COLUMN:
+            required.add(DISTRIBUTION_BASIS_COLUMN)
+        if COLUMNS_TO_DISTRIBUTE:
+            required.update(COLUMNS_TO_DISTRIBUTE)
+
         missing = required - set(column_mapping.keys())
         if missing:
-             logging.warning(f"Missing required header mappings needed for distribution: {missing}")
+             logging.warning(f"Missing required header mappings needed for processing: {missing}. Processing might fail or be incomplete.")
 
     return column_mapping
 
-def extract_raw_data(sheet, header_row: int, column_mapping: Dict[str, int]) -> Dict[str, List[Any]]:
-    """
-    Extracts data from rows below the header into a dictionary of lists.
-    """
-    if not column_mapping or header_row is None:
-        logging.error("Cannot extract data without valid header row and column mapping.")
-        # Return empty lists for all *expected* headers, not just mapped ones
-        return {key: [] for key in TARGET_HEADERS_MAP.keys()}
 
-    # Initialize raw_data only for the columns that were actually mapped
-    raw_data: Dict[str, List[Any]] = {key: [] for key in column_mapping.keys()}
-    start_data_row = header_row + 1
+def extract_multiple_tables(sheet, header_rows: List[int], column_mapping: Dict[str, int]) -> Dict[int, Dict[str, List[Any]]]:
+    """
+    Extracts data for multiple tables defined by header_rows.
+
+    Args:
+        sheet: The openpyxl worksheet object.
+        header_rows: A sorted list of 1-indexed header row numbers.
+        column_mapping: A dictionary mapping canonical header names to 1-indexed column numbers.
+
+    Returns:
+        A dictionary where keys are table indices (1, 2, 3...) and values are
+        dictionaries representing each table's data ({'header': [values...]}).
+    """
+    if not header_rows:
+        logging.warning("No header rows provided, cannot extract tables.")
+        return {}
+    if not column_mapping:
+        logging.error("Column mapping is empty, cannot extract data meaningfully.")
+        return {}
+
+    all_tables_data: Dict[int, Dict[str, List[Any]]] = {}
     stop_col_idx = column_mapping.get(STOP_EXTRACTION_ON_EMPTY_COLUMN) if STOP_EXTRACTION_ON_EMPTY_COLUMN else None
 
     if STOP_EXTRACTION_ON_EMPTY_COLUMN and not stop_col_idx:
-        logging.warning(f"Stop column '{STOP_EXTRACTION_ON_EMPTY_COLUMN}' not found in mapping. Relying on MAX_DATA_ROWS_TO_SCAN.")
+        logging.warning(f"Stop column '{STOP_EXTRACTION_ON_EMPTY_COLUMN}' is configured but not found in column mapping. Extraction will rely on MAX_DATA_ROWS_TO_SCAN or next header.")
 
-    logging.info(f"Starting data extraction from row {start_data_row}.")
-    rows_processed = 0
-    max_extraction_row = min(start_data_row + MAX_DATA_ROWS_TO_SCAN, sheet.max_row + 1)
+    # Iterate through each identified header row to define table boundaries
+    for i, header_row in enumerate(header_rows):
+        table_index = i + 1
+        start_data_row = header_row + 1
 
-    for current_row in range(start_data_row, max_extraction_row):
-        rows_processed += 1
+        # Determine the end row for the current table's data
+        if i + 1 < len(header_rows):
+            max_possible_end_row = header_rows[i + 1] # End before the next header
+        else:
+            max_possible_end_row = sheet.max_row + 1 # Last table, go to sheet end
 
-        # Check stopping condition based on designated column
-        if stop_col_idx:
-            stop_cell = sheet.cell(row=current_row, column=stop_col_idx)
-            # More robust check for empty: None or empty string after stripping
-            stop_cell_value_str = str(stop_cell.value).strip() if stop_cell.value is not None else ""
-            if not stop_cell_value_str:
-                logging.info(f"Stopping extraction at row {current_row}: Empty cell in stop column '{STOP_EXTRACTION_ON_EMPTY_COLUMN}' (Col {stop_col_idx}).")
-                break
+        # Apply MAX_DATA_ROWS_TO_SCAN limit relative to start_data_row
+        scan_limit_row = start_data_row + MAX_DATA_ROWS_TO_SCAN
+        # Actual end row is the minimum of the next header, scan limit, and sheet max row + 1
+        end_data_row = min(max_possible_end_row, scan_limit_row)
 
-        # Extract data for mapped columns in this row
-        for header, col_idx in column_mapping.items():
-            cell = sheet.cell(row=current_row, column=col_idx)
-            cell_value = cell.value
-            # Basic cleaning: strip whitespace if string
-            if isinstance(cell_value, str):
-                cell_value = cell_value.strip()
-            # Ensure the list exists before appending (should always exist here)
-            raw_data[header].append(cell_value)
+        logging.info(f"Extracting data for Table {table_index} (Header Row: {header_row}, Data Rows: {start_data_row} to {end_data_row - 1})")
 
-    # Check if loop finished due to reaching max rows
-    if current_row == max_extraction_row - 1 and rows_processed >= MAX_DATA_ROWS_TO_SCAN :
-         logging.warning(f"Reached MAX_DATA_ROWS_TO_SCAN limit ({MAX_DATA_ROWS_TO_SCAN}). Extraction might be incomplete.")
+        current_table_data: Dict[str, List[Any]] = {key: [] for key in column_mapping.keys()}
+        rows_extracted_for_table = 0
 
-    # Get length based on a reliably mapped column if possible, otherwise handle empty dict
-    data_rows_extracted = 0
-    if raw_data:
-        # Try getting length from the basis column if mapped, otherwise first key
-        basis_key = DISTRIBUTION_BASIS_COLUMN if DISTRIBUTION_BASIS_COLUMN in raw_data else next(iter(raw_data.keys()), None)
-        if basis_key:
-            data_rows_extracted = len(raw_data.get(basis_key, []))
+        # Extract data row by row for the current table
+        for current_row in range(start_data_row, end_data_row):
 
-    logging.info(f"Extracted raw data for {data_rows_extracted} rows.")
-    return raw_data
+            # Check stopping condition based on designated empty column
+            if stop_col_idx:
+                stop_cell = sheet.cell(row=current_row, column=stop_col_idx)
+                stop_cell_value = stop_cell.value
+                # Consider empty if None or an empty string after stripping
+                if stop_cell_value is None or (isinstance(stop_cell_value, str) and not stop_cell_value.strip()):
+                    logging.info(f"Stopping extraction for Table {table_index} at row {current_row}: Empty cell found in stop column '{STOP_EXTRACTION_ON_EMPTY_COLUMN}' (Col {stop_col_idx}).")
+                    break # Stop processing rows for *this* table
 
-# --- END OF FILE sheet_parser.py ---
+            # Extract data for all mapped columns in this row
+            for header, col_idx in column_mapping.items():
+                cell = sheet.cell(row=current_row, column=col_idx)
+                cell_value = cell.value
+                if isinstance(cell_value, str):
+                    cell_value = cell_value.strip()
+                current_table_data[header].append(cell_value)
+
+            rows_extracted_for_table += 1
+
+        # Log if MAX_DATA_ROWS_TO_SCAN limit was hit for this table
+        # Check if the loop actually finished *because* it hit the limit row exactly
+        if current_row == scan_limit_row - 1 and rows_extracted_for_table >= MAX_DATA_ROWS_TO_SCAN:
+             logging.warning(f"Reached MAX_DATA_ROWS_TO_SCAN limit ({MAX_DATA_ROWS_TO_SCAN}) for Table {table_index}. Extraction might be incomplete for this table.")
+
+        # Store the extracted data for the current table using its index
+        if rows_extracted_for_table > 0:
+            all_tables_data[table_index] = current_table_data
+            logging.info(f"Finished extracting {rows_extracted_for_table} rows for Table {table_index}.")
+        else:
+            logging.info(f"No data rows extracted for Table {table_index} (between row {start_data_row} and {end_data_row}).")
+
+
+    logging.info(f"Completed extraction. Found data for {len(all_tables_data)} tables.")
+    return all_tables_data
+
+# --- END OF FULL FILE: sheet_parser.py ---
