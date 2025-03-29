@@ -19,6 +19,12 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 # --- Constants for Log Truncation ---
 MAX_LOG_DICT_LEN = 3000 # Max length for printing large dicts in logs (for DEBUG)
 
+# --- Constants for FOB Compounding Formatting ---
+FOB_CHUNK_SIZE = 2  # How many items per group (e.g., PO1\PO2)
+FOB_INTRA_CHUNK_SEPARATOR = "\\"  # Separator within a group (e.g., backslash)
+FOB_INTER_CHUNK_SEPARATOR = "\n"  # Separator between groups (e.g., newline)
+
+
 # Type alias for the two possible initial aggregation structures
 InitialAggregationResults = Union[
     Dict[Tuple[Any, Any, Optional[decimal.Decimal]], Dict[str, decimal.Decimal]], # Standard Result
@@ -28,7 +34,7 @@ InitialAggregationResults = Union[
 FobCompoundingResult = Dict[str, Union[str, decimal.Decimal]]
 
 
-# *** FOB Compounding Function - Enhanced Debugging ***
+# *** FOB Compounding Function with Chunking ***
 def perform_fob_compounding(
     initial_results: InitialAggregationResults,
     aggregation_mode: str # 'standard' or 'custom' -> Needed to parse input keys correctly
@@ -37,7 +43,8 @@ def perform_fob_compounding(
     Performs FOB Compounding from standard or custom aggregation results.
 
     This function *always* runs after the initial aggregation step.
-    It combines all unique POs and Items into newline-separated SINGLE strings.
+    It combines all unique POs and Items into formatted SINGLE strings
+    (chunked based on constants).
     It sums all SQFT and Amount values. Returns a single dictionary record.
 
     Args:
@@ -91,7 +98,6 @@ def perform_fob_compounding(
              continue
 
         # --- Collect unique POs/Items ---
-        # Ensure conversion to string BEFORE adding to set
         po_str = str(po_key_val) if po_key_val is not None else "<MISSING_PO>"
         item_str = str(item_key_val) if item_key_val is not None else "<MISSING_ITEM>"
         unique_pos.add(po_str)
@@ -100,7 +106,6 @@ def perform_fob_compounding(
         # --- Sum numeric values ---
         sqft_sum = sums_dict.get('sqft_sum', decimal.Decimal(0))
         amount_sum = sums_dict.get('amount_sum', decimal.Decimal(0))
-        # Add type checks for robustness
         if not isinstance(sqft_sum, decimal.Decimal):
              logging.warning(f"{prefix} Invalid SQFT sum type for key {key}: {type(sqft_sum)}. Using 0.")
              sqft_sum = decimal.Decimal(0)
@@ -114,25 +119,45 @@ def perform_fob_compounding(
     logging.debug(f"{prefix} Unique POs collected: {unique_pos}")
     logging.debug(f"{prefix} Unique Items collected: {unique_items}")
 
-    # --- Final Combination ---
-    # Sort for consistent output order before joining
+    # --- Final Combination with Chunking ---
     sorted_pos = sorted(list(unique_pos))
     sorted_items = sorted(list(unique_items))
-    logging.debug(f"{prefix} Sorted PO list before join: {sorted_pos}")
-    logging.debug(f"{prefix} Sorted Item list before join: {sorted_items}")
+    logging.debug(f"{prefix} Sorted PO list before chunking: {sorted_pos}")
+    logging.debug(f"{prefix} Sorted Item list before chunking: {sorted_items}")
 
-    # *** Join elements into SINGLE strings using newline ***
-    combined_po_string = "\n".join(sorted_pos)
-    combined_item_string = "\n".join(sorted_items)
+    # Helper function for chunking and joining
+    def format_chunks(items: List[str], chunk_size: int, intra_sep: str, inter_sep: str) -> str:
+        if not items:
+            return ""
+        processed_chunks = []
+        for i in range(0, len(items), chunk_size):
+            chunk = items[i:i + chunk_size]
+            joined_chunk = intra_sep.join(chunk) # Join items within the chunk
+            processed_chunks.append(joined_chunk)
+        return inter_sep.join(processed_chunks) # Join the chunks together
 
-    # *** DEBUG LOGGING: Explicitly show the final strings and their types ***
+    # Apply the chunking format using configured constants
+    combined_po_string = format_chunks(
+        sorted_pos,
+        FOB_CHUNK_SIZE,
+        FOB_INTRA_CHUNK_SEPARATOR,
+        FOB_INTER_CHUNK_SEPARATOR
+    )
+    combined_item_string = format_chunks(
+        sorted_items,
+        FOB_CHUNK_SIZE,
+        FOB_INTRA_CHUNK_SEPARATOR,
+        FOB_INTER_CHUNK_SEPARATOR
+    )
+
+    # DEBUG LOGGING remains useful
     logging.debug(f"{prefix} Final combined_po_string (Type: {type(combined_po_string)}): '{combined_po_string}'")
     logging.debug(f"{prefix} Final combined_item_string (Type: {type(combined_item_string)}): '{combined_item_string}'")
 
     # Construct Result Dictionary
     fob_compounded_result: FobCompoundingResult = {
-        'combined_po': combined_po_string,    # Should be a single string (potentially multi-line)
-        'combined_item': combined_item_string, # Should be a single string (potentially multi-line)
+        'combined_po': combined_po_string,    # Now formatted with chunks
+        'combined_item': combined_item_string, # Now formatted with chunks
         'total_sqft': total_sqft,
         'total_amount': total_amount
     }
@@ -192,16 +217,13 @@ def run_invoice_automation():
         column_mapping = sheet_parser.map_columns_to_headers(sheet, first_header_row, cfg.HEADER_SEARCH_COL_RANGE)
         if not column_mapping: raise RuntimeError("Failed to map columns.")
         logging.debug(f"Mapped columns:\n{pprint.pformat(column_mapping)}")
-        # Check for essential 'amount' column needed for all aggregations
         if 'amount' not in column_mapping: raise RuntimeError("Essential 'amount' column mapping failed.")
 
         logging.info("Extracting data for all tables...")
         all_tables_data = sheet_parser.extract_multiple_tables(sheet, header_rows, column_mapping)
-        # Log extracted data at DEBUG level
         if logging.getLogger().getEffectiveLevel() <= logging.DEBUG:
             log_str = pprint.pformat(all_tables_data)
-            if len(log_str) > MAX_LOG_DICT_LEN:
-                 log_str = log_str[:MAX_LOG_DICT_LEN] + "\n... (output truncated)"
+            if len(log_str) > MAX_LOG_DICT_LEN: log_str = log_str[:MAX_LOG_DICT_LEN] + "\n... (output truncated)"
             logging.debug(f"--- Raw Extracted Data ({len(all_tables_data)} Table(s)) ---\n{log_str}")
         if not all_tables_data: logging.warning("Extraction resulted in empty data structure.")
         # --- End Steps 1-4 ---
@@ -216,44 +238,33 @@ def run_invoice_automation():
                 continue
 
             logging.info(f"--- Processing Table Index {table_index} ---")
-            # Check if table data is valid before proceeding
             if not isinstance(current_table_data, dict) or not current_table_data or not any(isinstance(v, list) and v for v in current_table_data.values()):
-                logging.warning(f"Table {table_index} empty or invalid. Skipping CBM, Distribution, Aggregation.")
-                processed_tables[table_index] = current_table_data # Store the empty/invalid data
+                logging.warning(f"Table {table_index} empty or invalid. Skipping steps.")
+                processed_tables[table_index] = current_table_data
                 continue
 
-            # --- 5a. CBM Calculation ---
+            # 5a. CBM Calculation
             logging.info(f"Table {table_index}: Calculating CBM values...")
-            try:
-                data_after_cbm = data_processor.process_cbm_column(current_table_data) # Modifies in place
-            except Exception as e:
-                logging.error(f"CBM calculation error for Table {table_index}: {e}", exc_info=True)
-                data_after_cbm = current_table_data # Use potentially modified data
+            try: data_after_cbm = data_processor.process_cbm_column(current_table_data)
+            except Exception as e: logging.error(f"CBM calc error Table {table_index}: {e}", exc_info=True); data_after_cbm = current_table_data
 
-            # --- 5b. Distribution ---
+            # 5b. Distribution
             logging.info(f"Table {table_index}: Distributing values...")
             try:
-                data_after_distribution = data_processor.distribute_values(
-                    data_after_cbm, # Use result from CBM step
-                    cfg.COLUMNS_TO_DISTRIBUTE,
-                    cfg.DISTRIBUTION_BASIS_COLUMN
-                ) # Modifies in place
-                processed_tables[table_index] = data_after_distribution # Store successfully processed data
+                data_after_distribution = data_processor.distribute_values(data_after_cbm, cfg.COLUMNS_TO_DISTRIBUTE, cfg.DISTRIBUTION_BASIS_COLUMN)
+                processed_tables[table_index] = data_after_distribution
             except data_processor.ProcessingError as pe:
-                logging.error(f"Distribution failed for Table {table_index}: {pe}. Storing pre-distribution data.")
-                processed_tables[table_index] = data_after_cbm # Store state after CBM but before failed dist
-                continue # Skip aggregation for this table if distribution fails
+                logging.error(f"Distribution failed Table {table_index}: {pe}. Storing pre-distribution data.")
+                processed_tables[table_index] = data_after_cbm; continue
             except Exception as e:
-                logging.error(f"Unexpected distribution error for Table {table_index}: {e}", exc_info=True)
-                processed_tables[table_index] = data_after_cbm # Fallback state
-                continue # Skip aggregation
+                logging.error(f"Unexpected distribution error Table {table_index}: {e}", exc_info=True)
+                processed_tables[table_index] = data_after_cbm; continue
 
-            # --- 5c. Initial Aggregation (Standard or Custom) ---
-            # Use the successfully processed data for aggregation
+            # 5c. Initial Aggregation (Standard or Custom)
             data_for_aggregation = processed_tables.get(table_index)
-            if isinstance(data_for_aggregation, dict) and data_for_aggregation: # Check if valid after distribution
+            if isinstance(data_for_aggregation, dict) and data_for_aggregation:
                 try:
-                    if use_custom_aggregation: # Check the flag determined earlier
+                    if use_custom_aggregation:
                         logging.info(f"Table {table_index}: Updating global CUSTOM aggregation...")
                         data_processor.aggregate_custom_by_po_item(data_for_aggregation, global_custom_aggregation_results)
                         logging.info(f"Table {table_index}: CUSTOM aggregation map updated.")
@@ -274,9 +285,7 @@ def run_invoice_automation():
         logging.info("--- All Table Processing Loops Completed ---")
         logging.info("--- Performing Final FOB Compounding (Always Runs) ---")
         try:
-            # Select the correct *input* based on the initial mode used
             initial_agg_data_source = global_custom_aggregation_results if use_custom_aggregation else global_standard_aggregation_results
-            # Call the compounding function
             global_fob_compounded_result = perform_fob_compounding(
                 initial_agg_data_source,
                 aggregation_mode_used # Pass mode to help parse input keys
@@ -313,7 +322,7 @@ def run_invoice_automation():
 
             # Log each component explicitly for clarity
             logging.info(f"Combined POs (Type: {type(po_string_value)}):")
-            logging.info(f"  repr(): {repr(po_string_value)}") # Shows literal \n
+            logging.info(f"  repr(): {repr(po_string_value)}") # Shows literal \n and \\
             logging.info(f"  Raw Value:\n{po_string_value}")   # Renders multi-line if \n present
             logging.info("-" * 30)
 
@@ -326,13 +335,12 @@ def run_invoice_automation():
             logging.info(f"Total Amount: {total_amount_value} (Type: {type(total_amount_value)})")
             logging.info("-" * 30)
 
-            # Optional notes based on newline presence
-            if isinstance(po_string_value, str) and '\n' not in po_string_value:
-                logging.info("NOTE: 'combined_po' is single line (only one unique PO found).")
-            if isinstance(item_string_value, str) and '\n' not in item_string_value:
-                logging.info("NOTE: 'combined_item' is single line (only one unique Item found).")
+            # Optional notes based on newline presence (less informative now with chunks)
+            # if isinstance(po_string_value, str) and FOB_INTER_CHUNK_SEPARATOR not in po_string_value:
+            #     logging.info(f"NOTE: 'combined_po' fits in one chunk group.")
+            # if isinstance(item_string_value, str) and FOB_INTER_CHUNK_SEPARATOR not in item_string_value:
+            #     logging.info(f"NOTE: 'combined_item' fits in one chunk group.")
         else:
-            # This case covers errors during compounding or if None was returned
             logging.error("FOB Compounding result is None or was not set, potentially due to an error during compounding.")
         # --- End Final Logging ---
 
@@ -341,12 +349,12 @@ def run_invoice_automation():
         # output_file = f"processed_{os.path.splitext(input_filename)[0]}.pkl"
         # try:
         #     combined_results = {
-        #         # "processed_tables": processed_tables, # Only if needed downstream
+        #         # "processed_tables": processed_tables,
         #         "aggregation_mode": aggregation_mode_used,
         #         "workbook_filename": input_filename,
         #         "worksheet_name": actual_sheet_name,
-        #         # "standard_aggregation_results": global_standard_aggregation_results, # Optional debug info
-        #         # "custom_aggregation_results": global_custom_aggregation_results,   # Optional debug info
+        #         # "standard_aggregation_results": global_standard_aggregation_results,
+        #         # "custom_aggregation_results": global_custom_aggregation_results,
         #         "fob_compounded_result": global_fob_compounded_result # The main result
         #     }
         #     with open(output_file, 'wb') as f_pickle:
