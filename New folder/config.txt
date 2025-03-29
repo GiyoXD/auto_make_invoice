@@ -19,7 +19,7 @@ HEADER_IDENTIFICATION_PATTERN = r"批次号|订单号|物料代码|总张数|净
 TARGET_HEADERS_MAP = {
     # --- Core Logic Canonical Names ---
     "po": ["po", "订单号"],                 # Primary English: 'po', Primary Chinese: '订单号'
-    "item": ["item no", "物料代码", 'item'],        # Primary English: 'item no', Primary Chinese: '物料代码'
+    "item": ["item no", "物料代码"],        # Primary English: 'item no', Primary Chinese: '物料代码'
     "pcs": ["pcs", "总张数"],                # Primary English: 'pcs', Primary Chinese: '总张数'
     "net": ["net weight", "净重", "net"],          # Primary English: 'net weight', Primary Chinese: '净重'
     "gross": ["gross weight", "毛重", "gross"],       # Primary English: 'gross weight', Primary Chinese: '毛重'
