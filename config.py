@@ -3,7 +3,7 @@
 # --- START OF FULL FILE: config.py ---
 
 # --- File Configuration ---
-INPUT_EXCEL_FILE = "25001.xlsx" # Or specific name for this format, e.g., "JF_Data_2024.xlsx"
+INPUT_EXCEL_FILE = "MAM1.xlsx" # Or specific name for this format, e.g., "JF_Data_2024.xlsx"
 # Specify sheet name, or None to use the active sheet
 SHEET_NAME = None
 # OUTPUT_PICKLE_FILE = "invoice_data.pkl" # Example for future use

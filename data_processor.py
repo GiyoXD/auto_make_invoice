@@ -1,6 +1,4 @@
-# --- START OF FILE data_processor.py ---
-
-# --- START OF FULL FILE: data_processor.py ---
+# --- START MODIFIED FILE: data_processor.py ---
 
 import logging
 from typing import Dict, List, Any, Optional, Tuple
@@ -8,7 +6,6 @@ import decimal # Use Decimal for precise calculations
 import re
 import pprint
 # Import config values (consider passing as arguments)
-# DISTRIBUTION_BASIS_COLUMN is needed here
 from config import DISTRIBUTION_BASIS_COLUMN # Keep this
 
 # Set precision for Decimal calculations
@@ -27,27 +24,20 @@ def _convert_to_decimal(value: Any, context: str = "") -> Optional[decimal.Decim
     """Safely convert a value to Decimal, logging errors."""
     prefix = "[_convert_to_decimal]"
     if isinstance(value, decimal.Decimal):
-        # logging.debug(f"{prefix} Input is already Decimal: {value}. Context: {context}")
-        return value # Avoid re-conversion
+        return value
     if value is None:
-        # logging.debug(f"{prefix} Input is None. Context: {context}")
         return None
     value_str = str(value).strip()
     if not value_str:
-        # logging.debug(f"{prefix} Input is empty string after strip. Context: {context}")
         return None
     try:
-        # Handle potential strings with commas if necessary (optional)
-        # cleaned_value = value_str.replace(',', '')
-        # return decimal.Decimal(cleaned_value)
         result = decimal.Decimal(value_str)
-        # logging.debug(f"{prefix} Converted '{value_str}' to Decimal {result}. Context: {context}")
         return result
     except (decimal.InvalidOperation, TypeError, ValueError) as e:
-        # Log conversion errors as WARNING
         logging.warning(f"{prefix} Could not convert '{value}' (Str: '{value_str}') to Decimal {context}: {e}")
         return None
 
+# _calculate_single_cbm function remains unchanged...
 def _calculate_single_cbm(cbm_value: Any, row_index: int) -> Optional[decimal.Decimal]:
     """
     Parses a CBM string (e.g., "L*W*H" or "LxWxH") and calculates the volume.
@@ -116,7 +106,6 @@ def _calculate_single_cbm(cbm_value: Any, row_index: int) -> Optional[decimal.De
              if dim is None:
                  logging.warning(f"{prefix} Failed to convert dimension part {i+1} ('{part}') to Decimal. {log_context}")
                  valid_dims = False
-                 # Break early? Or continue to log all failed parts? Continue for now.
              dims.append(dim)
 
         if not valid_dims:
@@ -124,12 +113,6 @@ def _calculate_single_cbm(cbm_value: Any, row_index: int) -> Optional[decimal.De
             return None
 
         dim1, dim2, dim3 = dims
-
-        # Optional: Check for non-positive dimensions
-        # if dim1 <= 0 or dim2 <= 0 or dim3 <= 0:
-        #      logging.warning(f"{prefix} Non-positive dimension found in CBM '{cbm_str}' [{dim1}, {dim2}, {dim3}]. Result may be non-positive. {log_context}")
-
-        # Calculate volume and quantize to the defined CBM precision
         volume = (dim1 * dim2 * dim3).quantize(CBM_DECIMAL_PLACES, rounding=decimal.ROUND_HALF_UP)
         logging.debug(f"{prefix} Calculated CBM volume: {volume} from '{cbm_str}' (Dims: {dims}). {log_context}")
         return volume
@@ -138,7 +121,7 @@ def _calculate_single_cbm(cbm_value: Any, row_index: int) -> Optional[decimal.De
         logging.error(f"{prefix} Unexpected error calculating CBM from '{cbm_str}': {e}. {log_context}", exc_info=True)
         return None
 
-
+# process_cbm_column function remains unchanged...
 def process_cbm_column(raw_data: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
     """
     Iterates through the 'cbm' list in raw_data, calculates numeric CBM values
@@ -175,7 +158,7 @@ def process_cbm_column(raw_data: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
     logging.info(f"{prefix} Finished processing '{cbm_key}' column. List now contains calculated values (Decimals or Nones).")
     return raw_data
 
-
+# distribute_values function remains unchanged...
 def distribute_values(
     raw_data: Dict[str, List[Any]],
     columns_to_distribute: List[str],
@@ -254,9 +237,9 @@ def distribute_values(
 
         # Pre-convert original values for the column being distributed
         current_col_values_dec: List[Optional[decimal.Decimal]] = [
-             _convert_to_decimal(val, f"{prefix} column '{col_name}' row index {i}")
              # Keep existing Decimals (e.g., from CBM calc), attempt conversion otherwise
-             if not isinstance(val, decimal.Decimal) else val
+             val if isinstance(val, decimal.Decimal)
+             else _convert_to_decimal(val, f"{prefix} column '{col_name}' row index {i}")
              for i, val in enumerate(original_col_values)
         ]
         logging.debug(f"{prefix} Pre-converted values for '{col_name}' (first 10): {current_col_values_dec[:10]}")
@@ -396,82 +379,137 @@ def distribute_values(
     return processed_data # Return the dictionary with modified lists
 
 
-# *** Standard Aggregation Function (Modified slightly for clarity) ***
-def aggregate_sqft_by_po_item_price(
+# *** Standard Aggregation Function (MODIFIED to handle SQFT and AMOUNT) ***
+def aggregate_standard_by_po_item_price( # Renamed for clarity
     processed_data: Dict[str, List[Any]],
-    global_aggregation_map: Dict[Tuple[Any, Any, Optional[decimal.Decimal]], decimal.Decimal]
-) -> Dict[Tuple[Any, Any, Optional[decimal.Decimal]], decimal.Decimal]:
+    # UPDATED TYPE HINT: Value is now a Dict storing sums
+    global_aggregation_map: Dict[Tuple[Any, Any, Optional[decimal.Decimal]], Dict[str, decimal.Decimal]]
+) -> Dict[Tuple[Any, Any, Optional[decimal.Decimal]], Dict[str, decimal.Decimal]]:
     """
-    STANDARD Aggregation: Aggregates 'sqft' values based on unique combinations
-    of 'po', 'item', and 'unit' price. Updates the global_aggregation_map in place.
+    STANDARD Aggregation: Aggregates 'sqft' AND 'amount' values based on unique
+    combinations of 'po', 'item', and 'unit' price. Updates the global_aggregation_map in place.
 
     Args:
         processed_data: Dictionary representing the data of the current table.
         global_aggregation_map: The dictionary holding the cumulative aggregation results.
+                                  Value is Dict{'sqft_sum': Decimal, 'amount_sum': Decimal}.
 
     Returns:
         The updated global_aggregation_map.
     """
     aggregated_results = global_aggregation_map
-    required_cols = ['po', 'item', 'unit', 'sqft']
-    prefix = "[aggregate_standard_sqft]" # Changed log prefix for clarity
+    # UPDATED: Add 'amount' to required columns
+    required_cols = ['po', 'item', 'unit', 'sqft', 'amount']
+    prefix = "[aggregate_standard]" # Changed log prefix for clarity
 
-    logging.debug(f"{prefix} Updating global STANDARD SQFT aggregation with new table data.")
+    logging.debug(f"{prefix} Updating global STANDARD aggregation (SQFT & Amount) with new table data.")
     logging.debug(f"{prefix} Size of global map BEFORE processing this table: {len(aggregated_results)}")
 
-    # --- Input Validation --- (Same as before)
+    # --- Input Validation ---
     if not isinstance(processed_data, dict):
         logging.error(f"{prefix} Input 'processed_data' is not a dictionary. Cannot aggregate.")
         return aggregated_results
+
     missing_cols = [col for col in required_cols if col not in processed_data]
     if missing_cols:
-        logging.warning(f"{prefix} Cannot perform STANDARD SQFT aggregation: Missing required columns {missing_cols}.")
+        logging.warning(f"{prefix} Cannot perform STANDARD aggregation: Missing required columns {missing_cols}. Skipping aggregation for this table.")
         return aggregated_results
-    po_list = processed_data.get('po')
-    item_list = processed_data.get('item')
-    unit_list = processed_data.get('unit')
-    sqft_list = processed_data.get('sqft')
-    lists_valid = True
-    for col_name, data_list in [('po', po_list), ('item', item_list), ('unit', unit_list), ('sqft', sqft_list)]:
-        if not isinstance(data_list, list):
-            logging.error(f"{prefix} Required column '{col_name}' data is not a list. Aborting aggregation.")
-            lists_valid = False
-            break
-    if not lists_valid: return aggregated_results
+
+    # Safely get lists and check types - Use get() with default empty list
+    po_list = processed_data.get('po', [])
+    item_list = processed_data.get('item', [])
+    unit_list = processed_data.get('unit', [])
+    sqft_list = processed_data.get('sqft', [])
+    amount_list = processed_data.get('amount', []) # Get amount list
+
+    # Use length of 'po' list as the reference number of rows
     num_rows = len(po_list)
-    if not all(len(lst) == num_rows for lst in [item_list, unit_list, sqft_list]):
-        logging.error(f"{prefix} Data length mismatch. Aborting aggregation.")
+    logging.debug(f"{prefix} Input data contains lists. Number of rows based on 'po' list: {num_rows}")
+
+    # Check for length consistency across all required lists
+    all_lists_to_check = {'item': item_list, 'unit': unit_list, 'sqft': sqft_list, 'amount': amount_list}
+    if not all(len(lst) == num_rows for lst in all_lists_to_check.values()):
+        lengths = {k: len(v) for k, v in all_lists_to_check.items()}
+        logging.error(f"{prefix} Data length mismatch! PO:{num_rows}, Others:{lengths}. Aborting standard aggregation for this table.")
         return aggregated_results
+
     if num_rows == 0:
-        logging.info(f"{prefix} No data rows found. Global map unchanged.")
+        logging.info(f"{prefix} No data rows found in this table. Global map unchanged.")
         return aggregated_results
 
-    logging.info(f"{prefix} Processing {num_rows} rows for STANDARD SQFT aggregation.")
+    logging.info(f"{prefix} Processing {num_rows} rows for STANDARD aggregation (SQFT & Amount).")
 
-    # --- Iterate and Aggregate --- (Same logic as before)
+    # --- Iterate and Aggregate ---
     rows_processed_this_table = 0
+    successful_conversions_sqft = 0
+    successful_conversions_amount = 0
+
     for i in range(num_rows):
         rows_processed_this_table += 1
         log_row_context = f"{prefix} Table Row index {i}"
         logging.debug(f"{log_row_context} --- Processing ---")
-        po_val, item_val, unit_price_raw, sqft_raw = po_list[i], item_list[i], unit_list[i], sqft_list[i]
+
+        # Get raw values
+        po_val, item_val = po_list[i], item_list[i]
+        unit_price_raw, sqft_raw, amount_raw = unit_list[i], sqft_list[i], amount_list[i]
+        logging.debug(f"{log_row_context}: Raw values - PO='{po_val}', Item='{item_val}', Price='{unit_price_raw}', SQFT='{sqft_raw}', Amount='{amount_raw}'")
+
+
+        # Prepare key components
         po_key = str(po_val).strip() if isinstance(po_val, str) else po_val
         item_key = str(item_val).strip() if isinstance(item_val, str) else item_val
         po_key = po_key if po_key is not None else "<MISSING_PO>"
         item_key = item_key if item_key is not None else "<MISSING_ITEM>"
-        price_dec = _convert_to_decimal(unit_price_raw, f"{log_row_context} price")
-        key = (po_key, item_key, price_dec)
-        sqft_dec = _convert_to_decimal(sqft_raw, f"{log_row_context} SQFT") or decimal.Decimal(0)
-        current_sum = aggregated_results.get(key, decimal.Decimal(0))
-        aggregated_results[key] = current_sum + sqft_dec
-        logging.debug(f"{log_row_context}: Key={key}, RawSQFT='{sqft_raw}', DecSQFT={sqft_dec}, NewSum={aggregated_results[key]}")
 
-    logging.info(f"{prefix} Finished processing {rows_processed_this_table} rows. Global map size: {len(aggregated_results)}")
+        # Convert price to Decimal for the key
+        price_dec = _convert_to_decimal(unit_price_raw, f"{log_row_context} price")
+        # Key remains (PO, Item, Price)
+        key = (po_key, item_key, price_dec)
+        logging.debug(f"{log_row_context}: Generated Key Tuple = {key}")
+
+
+        # Convert SQFT and Amount to Decimal for summation
+        sqft_dec = _convert_to_decimal(sqft_raw, f"{log_row_context} SQFT")
+        if sqft_dec is None:
+             logging.debug(f"{log_row_context}: SQFT value '{sqft_raw}' is None or failed conversion. Using 0.")
+             sqft_dec = decimal.Decimal(0)
+        else:
+             successful_conversions_sqft +=1
+
+        amount_dec = _convert_to_decimal(amount_raw, f"{log_row_context} Amount")
+        if amount_dec is None:
+            logging.debug(f"{log_row_context}: Amount value '{amount_raw}' is None or failed conversion. Using 0.")
+            amount_dec = decimal.Decimal(0)
+        else:
+            successful_conversions_amount +=1
+
+        logging.debug(f"{log_row_context}: Converted values - SQFT='{sqft_dec}', Amount='{amount_dec}'")
+
+        # --- UPDATED LOGIC: Add to the global aggregate sums (SQFT & Amount) ---
+        # Get the current dictionary of sums for the key, or a default dict if key is new
+        current_sums = aggregated_results.get(key, {'sqft_sum': decimal.Decimal(0), 'amount_sum': decimal.Decimal(0)})
+
+        logging.debug(f"{log_row_context}: Sums for key {key} BEFORE add = {current_sums}")
+
+        # Update the sums
+        current_sums['sqft_sum'] += sqft_dec
+        current_sums['amount_sum'] += amount_dec
+
+        # Store the updated dictionary back into the global map
+        aggregated_results[key] = current_sums
+        logging.debug(f"{log_row_context}: Global sums for key {key} AFTER add = {aggregated_results[key]}")
+        # logging.debug(f"{log_row_context} --- End Processing ---")
+
+
+    logging.info(f"{prefix} Finished processing {rows_processed_this_table} rows.")
+    logging.info(f"{prefix} SQFT values successfully converted/defaulted for {successful_conversions_sqft} rows.")
+    logging.info(f"{prefix} Amount values successfully converted/defaulted for {successful_conversions_amount} rows.")
+    logging.info(f"{prefix} Global standard aggregation map size: {len(aggregated_results)}")
     logging.debug(f"{prefix} Global Standard Aggregated Results (End of Table):\n{pprint.pformat(aggregated_results)}")
     return aggregated_results
 
 
-# *** NEW Custom Aggregation Function ***
+# *** Custom Aggregation Function (Remains Unchanged) ***
 def aggregate_custom_by_po_item(
     processed_data: Dict[str, List[Any]],
     global_custom_aggregation_map: Dict[Tuple[Any, Any], Dict[str, decimal.Decimal]]
@@ -608,5 +646,4 @@ def aggregate_custom_by_po_item(
 
     return aggregated_results # Return the modified global map
 
-
-# --- END OF FULL FILE: data_processor.py ---
+# --- END MODIFIED FILE: data_processor.py ---
