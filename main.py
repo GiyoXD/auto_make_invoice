@@ -1,4 +1,4 @@
-# --- START OF FILE main.txt ---
+# --- START OF FILE main.py ---
 
 # --- START OF FULL FILE: main.py ---
 
@@ -6,6 +6,7 @@ import logging
 import pprint # For nicely printing dictionaries
 import re     # Keep import re, potentially used internally or future use
 import decimal # Import decimal for type hints and potential direct use
+import os     # *** Import os module ***
 from typing import Dict, List, Any, Optional, Tuple # Import necessary types
 
 # Import from our refactored modules
@@ -25,12 +26,35 @@ def run_invoice_automation():
     """Main function to find tables, extract, and process data for each."""
     logging.info("--- Starting Invoice Automation ---")
     handler = None  # Initialize handler outside try block
+    actual_sheet_name = None # Still useful to know which sheet was processed
+
     # Dictionary to store the final processed data (post-distribution) per table
     processed_tables: Dict[int, Dict[str, Any]] = {}
-    # *** CHANGED: Single global dictionary for aggregated SQFT results ***
-    global_aggregated_sqft_results: Dict[Tuple[Any, Any, Optional[decimal.Decimal]], decimal.Decimal] = {}
     # Dictionary to store raw extracted data per table
     all_tables_data: Dict[int, Dict[str, List[Any]]] = {}
+
+    # *** Global dictionaries for aggregation results ***
+    global_standard_aggregated_sqft_results: Dict[Tuple[Any, Any, Optional[decimal.Decimal]], decimal.Decimal] = {}
+    global_custom_aggregation_results: Dict[Tuple[Any, Any], Dict[str, decimal.Decimal]] = {}
+    # Flag to track which aggregation mode is used
+    aggregation_mode_used = "standard" # Default
+
+    # --- Determine Aggregation Strategy based on WORKBOOK FILENAME ---
+    # Do this BEFORE loading the sheet, as it only depends on config
+    use_custom_aggregation = False
+    input_filename = os.path.basename(cfg.INPUT_EXCEL_FILE) # Get filename part only
+    logging.info(f"Checking workbook filename '{input_filename}' for custom aggregation trigger.")
+    for prefix in cfg.CUSTOM_AGGREGATION_WORKBOOK_PREFIXES: # Use renamed config variable
+        # Use case-sensitive comparison as defined in config comment
+        if input_filename.startswith(prefix):
+            use_custom_aggregation = True
+            aggregation_mode_used = "custom"
+            logging.info(f"Workbook filename '{input_filename}' starts with prefix '{prefix}'. Will use CUSTOM aggregation (by PO, Item for SQFT & Amount).")
+            break # Found a match
+    if not use_custom_aggregation:
+         logging.info(f"Workbook filename '{input_filename}' does not match custom prefixes {cfg.CUSTOM_AGGREGATION_WORKBOOK_PREFIXES}. Will use STANDARD aggregation (by PO, Item, Price for SQFT).")
+         aggregation_mode_used = "standard"
+    # ----------------------------------------------------------------
 
     try:
         # --- 1. Load Excel Sheet ---
@@ -39,8 +63,13 @@ def run_invoice_automation():
         sheet = handler.load_sheet(sheet_name=cfg.SHEET_NAME, data_only=True) # data_only=True is crucial
 
         if sheet is None:
-            # Error already logged by ExcelHandler
             raise RuntimeError(f"Failed to load sheet from '{cfg.INPUT_EXCEL_FILE}'. Exiting.")
+        else:
+            # Store the actual sheet name that was loaded (still useful info)
+            actual_sheet_name = sheet.title
+            logging.info(f"Successfully loaded worksheet: '{actual_sheet_name}' from workbook '{input_filename}'")
+
+        # --- Aggregation Strategy was determined above ---
 
         # --- 2. Find All Header Rows ---
         logging.info("Searching for all header rows...")
@@ -52,13 +81,11 @@ def run_invoice_automation():
         )
 
         if not header_rows:
-             # Error/Warning already logged by find_all_header_rows
              raise RuntimeError("Could not find any header rows matching the pattern. Cannot proceed.")
 
-        logging.info(f"Found {len(header_rows)} potential header row(s) at: {header_rows}") # Logged in find_all_header_rows too
+        logging.info(f"Found {len(header_rows)} potential header row(s) at: {header_rows}")
 
         # --- 3. Map Columns (Based on the FIRST header) ---
-        # Assumption: All tables below the first header use the same column layout
         first_header_row = header_rows[0]
         logging.info(f"Mapping columns based on the first identified header row ({first_header_row})...")
         column_mapping = sheet_parser.map_columns_to_headers(
@@ -68,191 +95,140 @@ def run_invoice_automation():
         )
 
         if not column_mapping:
-             # Error/Warning logged by map_columns_to_headers
              raise RuntimeError("Failed to map required columns from the first header row. Check header names and config.")
-        # Log the mapping details at DEBUG level as it can be verbose
-        logging.debug(f"Successfully mapped {len(column_mapping)} columns:")
-        logging.debug(pprint.pformat(column_mapping))
-        # Essential columns check log is already inside map_columns_to_headers
+        logging.debug(f"Successfully mapped {len(column_mapping)} columns:\n{pprint.pformat(column_mapping)}")
 
         # --- 4. Extract Data for All Tables ---
         logging.info("Extracting data for all identified tables using the derived column mapping...")
         all_tables_data = sheet_parser.extract_multiple_tables(
             sheet,
-            header_rows,      # Pass the list of all found header rows
-            column_mapping    # Pass the single mapping derived from the first header
+            header_rows,
+            column_mapping
         )
 
-        # --- Log Raw Extracted Data (using DEBUG level for full detail) --- #
-        logging.debug(f"--- Raw Extracted Data ({len(all_tables_data)} Table(s)) ---")
-        if all_tables_data:
-            logging.debug(f"\n{pprint.pformat(all_tables_data)}") # Log full dict at DEBUG
-        else:
-            logging.info("No raw data was extracted (dictionary is empty).") # INFO level if empty
-        #######################################################################
-
+        logging.debug(f"--- Raw Extracted Data ({len(all_tables_data)} Table(s)) ---\n{pprint.pformat(all_tables_data)}")
         if not all_tables_data:
-             # This might be normal if the sheet has headers but no data rows below them
-             logging.warning("Extraction resulted in an empty data structure. Processing will stop. Check if sheet has data below headers or if extraction criteria (stop column, limits) are too strict.")
-             # Stop processing if extraction yields nothing
-             # return # Or raise specific exception
-
+             logging.warning("Extraction resulted in an empty data structure. Processing will stop.")
+             # return
 
         # --- 5. Process Each Table Individually ---
         logging.info(f"--- Starting Data Processing Loop for {len(all_tables_data)} Extracted Table(s) ---")
         for table_index, raw_data_dict in all_tables_data.items():
-            # Use .get() in case all_tables_data somehow doesn't have expected index (shouldn't happen)
+            # [ ... CBM and Distribution steps remain unchanged ... ]
             current_table_data = all_tables_data.get(table_index)
             if current_table_data is None:
-                 logging.error(f"!!! Internal Error: Attempting to process table_index {table_index} but it's missing from all_tables_data. Skipping.")
+                 logging.error(f"!!! Internal Error: Skipping processing for missing table_index {table_index}.")
                  continue
 
             logging.info(f"--- Processing Table Index {table_index} ---")
-            logging.debug(f"Initial data for Table {table_index} (first 5 rows sample):\n{pprint.pformat({k: v[:5] for k, v in current_table_data.items()})}")
+            logging.debug(f"Initial data sample (first 5 rows):\n{pprint.pformat({k: v[:5] for k, v in current_table_data.items() if isinstance(v, list)})}")
 
-
-            # Basic check if the dictionary contains any actual data lists or rows
             if not isinstance(current_table_data, dict) or not current_table_data or not any(isinstance(v, list) and v for v in current_table_data.values()):
-                logging.warning(f"Table {table_index} appears to be empty or contains no valid list data after extraction. Skipping CBM, Distribution, and Aggregation.")
-                processed_tables[table_index] = current_table_data # Store the empty/invalid dict
-                # No aggregation result to store per table anymore
+                logging.warning(f"Table {table_index} empty or invalid. Skipping CBM, Distribution, and Aggregation.")
+                processed_tables[table_index] = current_table_data
                 continue
 
             # --- 5a. Pre-process: Calculate CBM ---
             logging.info(f"Table {table_index}: Calculating CBM values...")
             try:
-                 # process_cbm_column modifies the dictionary in place
-                 # Pass the dictionary for the current table index
                  data_after_cbm = data_processor.process_cbm_column(current_table_data) # Modifies current_table_data
             except Exception as cbm_e:
                  logging.error(f"Error during CBM calculation for Table {table_index}: {cbm_e}", exc_info=True)
-                 # The 'current_table_data' dictionary might be partially modified or unchanged
-                 data_after_cbm = current_table_data # Use the dictionary state after the error attempt
-                 logging.warning(f"Proceeding for Table {table_index} using data state after CBM calculation attempt (might be inconsistent if error occurred mid-process).")
+                 data_after_cbm = current_table_data # Use potentially modified state
+                 logging.warning(f"Proceeding for Table {table_index} using data state after CBM error.")
 
             # --- 5b. Process: Distribute Values ---
             logging.info(f"Table {table_index}: Distributing values...")
             try:
-                # distribute_values also modifies the dictionary in place
-                # Use the dictionary that resulted from the CBM step
                 data_after_distribution = data_processor.distribute_values(
-                    data_after_cbm,             # Input dict (potentially modified by CBM)
-                    cfg.COLUMNS_TO_DISTRIBUTE,  # List of columns like ["net", "gross", "cbm"]
-                    cfg.DISTRIBUTION_BASIS_COLUMN # e.g., "pcs"
+                    data_after_cbm,
+                    cfg.COLUMNS_TO_DISTRIBUTE,
+                    cfg.DISTRIBUTION_BASIS_COLUMN
                 )
-                # Store this dictionary state as the main processed result for the table
-                processed_tables[table_index] = data_after_distribution # This IS the modified data_after_cbm dict
+                processed_tables[table_index] = data_after_distribution # Store successful distribution
 
             except data_processor.ProcessingError as pe:
-                 # Handle specific processing errors from distribute_values
-                 logging.error(f"Value distribution failed for Table {table_index}: {pe}. Storing data state *before* distribution attempt.")
-                 # Store the data as it was *before* the failed distribution call
-                 processed_tables[table_index] = data_after_cbm # Fallback to pre-distribution state
-                 logging.warning(f"Skipping SQFT aggregation update for Table {table_index} due to distribution error.")
-                 # No per-table aggregation result to store/clear
-                 continue # Move to the next table index
+                 logging.error(f"Value distribution failed for Table {table_index}: {pe}. Storing data state *before* distribution.")
+                 processed_tables[table_index] = data_after_cbm # Fallback
+                 logging.warning(f"Skipping Aggregation update for Table {table_index} due to distribution error.")
+                 continue # Move to next table
             except Exception as dist_e:
-                # Catch any other unexpected errors during distribution
-                logging.error(f"An unexpected error occurred during value distribution for Table {table_index}: {dist_e}", exc_info=True)
-                processed_tables[table_index] = data_after_cbm # Fallback state
-                logging.warning(f"Skipping SQFT aggregation update for Table {table_index} due to unexpected distribution error.")
-                # No per-table aggregation result to store/clear
-                continue # Move to the next table index
+                logging.error(f"Unexpected error during value distribution for Table {table_index}: {dist_e}", exc_info=True)
+                processed_tables[table_index] = data_after_cbm # Fallback
+                logging.warning(f"Skipping Aggregation update for Table {table_index} due to distribution error.")
+                continue # Move to next table
 
+            # --- 5c. Process: Aggregate (Conditional - decision already made) ---
+            data_for_aggregation = processed_tables.get(table_index)
 
-            # --- 5c. Process: Aggregate SQFT ---
-            # This step operates on the data *after* successful distribution
-            # It now UPDATES the global aggregation map
-            logging.info(f"Table {table_index}: Updating global SQFT aggregation...")
-            try:
-                # Get the data that was successfully processed through distribution
-                # This should be the dictionary stored in processed_tables for this index
-                data_for_aggregation = processed_tables.get(table_index)
-
-                # --- Logging before aggregation call (Good for debugging) ---
-                logging.debug(f"[main - Aggregation Input] --- Data being passed to aggregate_sqft_by_po_item_price for Table {table_index} ---")
-                if isinstance(data_for_aggregation, dict) and data_for_aggregation:
-                    required_keys = {'po', 'item', 'unit', 'sqft'}
-                    keys_present = set(data_for_aggregation.keys())
-                    required_keys_present = required_keys.issubset(keys_present)
-                    logging.debug(f"[main - Aggregation Input] Required keys {required_keys} present? {required_keys_present}")
-                    if not required_keys_present:
-                        logging.warning(f"[main - Aggregation Input] Missing one or more required keys for SQFT aggregation in data for Table {table_index}. Keys present: {list(keys_present)}. Missing: {required_keys - keys_present}")
-                    logging.debug(f"[main - Aggregation Input] Content for Table {table_index}:\n{pprint.pformat(data_for_aggregation)}")
-                elif not data_for_aggregation:
-                    logging.warning(f"[main - Aggregation Input] Data dictionary for Table {table_index} is empty or None before aggregation call.")
+            if isinstance(data_for_aggregation, dict) and data_for_aggregation:
+                if use_custom_aggregation: # Use the flag set earlier
+                    logging.info(f"Table {table_index}: Updating global CUSTOM aggregation (SQFT & Amount)...")
+                    try:
+                        data_processor.aggregate_custom_by_po_item(data_for_aggregation, global_custom_aggregation_results)
+                        logging.info(f"Table {table_index}: Successfully updated global CUSTOM aggregation map.")
+                    except Exception as agg_e:
+                        logging.error(f"Global CUSTOM aggregation update failed for Table {table_index}: {agg_e}", exc_info=True)
                 else:
-                    logging.error(f"[main - Aggregation Input] Data for Table {table_index} is not a dictionary (Type: {type(data_for_aggregation).__name__}) before aggregation call.")
-                # --- End of Logging ---
-
-                # Call the aggregation function only if data is a valid dict and not empty
-                if isinstance(data_for_aggregation, dict) and data_for_aggregation:
-                     # *** Pass the global map to be updated ***
-                     data_processor.aggregate_sqft_by_po_item_price(
-                         data_for_aggregation,
-                         global_aggregated_sqft_results # Pass the global dict
-                     )
-                     logging.info(f"Table {table_index}: Successfully updated global SQFT aggregation map.")
-                else:
-                     logging.warning(f"Table {table_index}: Skipping global SQFT aggregation update because data is not a valid/non-empty dictionary.")
-
-                # *** REMOVED: No per-table storage ***
-                # all_aggregated_sqft_results[table_index] = aggregated_sqft_data
-
-                # Logging of aggregation summary is now inside the function for this table
-                # Optional: Add a log here confirming the update call was made.
-
-            except Exception as agg_e:
-                 # Catch potential errors during aggregation update for this specific table
-                 logging.error(f"Global SQFT aggregation update failed unexpectedly while processing Table {table_index}: {agg_e}", exc_info=True)
-                 # The global map might be partially updated from this table; continue processing other tables.
-                 logging.warning(f"Continuing to next table after aggregation error in Table {table_index}.")
-                 # *** REMOVED: No per-table storage to clear ***
-                 # all_aggregated_sqft_results[table_index] = {}
-
+                    logging.info(f"Table {table_index}: Updating global STANDARD SQFT aggregation...")
+                    try:
+                        data_processor.aggregate_sqft_by_po_item_price(data_for_aggregation, global_standard_aggregated_sqft_results)
+                        logging.info(f"Table {table_index}: Successfully updated global STANDARD SQFT aggregation map.")
+                    except Exception as agg_e:
+                        logging.error(f"Global STANDARD SQFT aggregation update failed for Table {table_index}: {agg_e}", exc_info=True)
+            else:
+                 logging.warning(f"Table {table_index}: Skipping aggregation update because processed data is invalid/empty.")
 
             logging.info(f"--- Finished Processing All Steps for Table Index {table_index} ---")
 
 
         # --- 6. Output / Further Steps ---
         logging.info("--- All Table Processing Loops Completed ---")
-        logging.info(f"Final processed data structure (post-distribution) contains results for {len(processed_tables)} table index(es): {list(processed_tables.keys())}")
-        # *** CHANGED: Log about the single global map ***
-        logging.info(f"Final global aggregated SQFT results structure contains {len(global_aggregated_sqft_results)} unique key combinations across all tables.")
+        logging.info(f"Final processed data structure contains results for {len(processed_tables)} table index(es): {list(processed_tables.keys())}")
+        # Log based on workbook filename now
+        logging.info(f"Aggregation mode used based on workbook '{input_filename}': {aggregation_mode_used.upper()}")
 
-        # --- Log Final Processed Data (Post-Distribution) --- #
-        logging.debug("--- Final Processed Data (Post-Distribution, All Tables) ---")
-        if processed_tables:
-            processed_output = pprint.pformat(processed_tables)
-            # Log full output at DEBUG, potentially truncated at INFO if needed later
-            logging.debug(f"\n{processed_output}")
-        else:
-             logging.info("No final processed data was generated (dictionary is empty).")
+        # --- Log Final Processed Data --- #
+        logging.debug("--- Final Processed Data (Post-Distribution, All Tables) ---\n{pprint.pformat(processed_tables)}")
+        # ... (rest of processed data logging) ...
+
+        # --- Log Final Aggregation Results (Conditional) --- #
+        if aggregation_mode_used == "custom":
+            logging.info(f"--- Final Global CUSTOM Aggregation Results (Workbook: '{input_filename}') ---")
+            if global_custom_aggregation_results:
+                agg_output = pprint.pformat(global_custom_aggregation_results)
+                if len(agg_output) > MAX_LOG_DICT_LEN and logging.getLogger().getEffectiveLevel() > logging.DEBUG:
+                     agg_output = agg_output[:MAX_LOG_DICT_LEN] + "\n... (output truncated)"
+                logging.info(f"Custom aggregation resulted in {len(global_custom_aggregation_results)} unique (PO, Item) keys.")
+                logging.info(f"\n{agg_output}")
+                logging.debug(f"Full Final Global Custom Aggregation:\n{pprint.pformat(global_custom_aggregation_results)}")
+            else:
+                logging.info("No custom aggregated results were generated.")
+        else: # Standard aggregation was used
+            logging.info(f"--- Final Global STANDARD Aggregation Results (Workbook: '{input_filename}') ---")
+            if global_standard_aggregated_sqft_results:
+                agg_output = pprint.pformat(global_standard_aggregated_sqft_results)
+                if len(agg_output) > MAX_LOG_DICT_LEN and logging.getLogger().getEffectiveLevel() > logging.DEBUG:
+                     agg_output = agg_output[:MAX_LOG_DICT_LEN] + "\n... (output truncated)"
+                logging.info(f"Standard aggregation resulted in {len(global_standard_aggregated_sqft_results)} unique (PO, Item, Price) keys.")
+                logging.info(f"\n{agg_output}")
+                logging.debug(f"Full Final Global Standard Aggregation:\n{pprint.pformat(global_standard_aggregated_sqft_results)}")
+            else:
+                logging.info("No standard aggregated SQFT results were generated.")
         ########################################################
-
-        # --- Log Final Aggregated SQFT Results --- ##############
-        # *** CHANGED: Log the single global map ***
-        logging.info("--- Final Global Aggregated SQFT Results (All Tables Combined) ---")
-        if global_aggregated_sqft_results:
-            agg_sqft_output = pprint.pformat(global_aggregated_sqft_results)
-            # Log full output at DEBUG, truncate for INFO if it were enabled
-            if len(agg_sqft_output) > MAX_LOG_DICT_LEN and logging.getLogger().getEffectiveLevel() > logging.DEBUG:
-                 agg_sqft_output = agg_sqft_output[:MAX_LOG_DICT_LEN] + "\n... (output truncated)"
-            logging.info(f"\n{agg_sqft_output}") # Print potentially truncated at INFO
-            logging.debug(f"Full Final Global Aggregated SQFT:\n{pprint.pformat(global_aggregated_sqft_results)}") # Full at DEBUG
-        else:
-            logging.info("No aggregated SQFT results were generated across any tables.")
-        ########################################################
-
 
         # --- Future steps example: Save results ---
+        # Consider saving the relevant aggregation result based on the mode
         # import pickle
-        # output_file = "processed_invoice_data.pkl"
+        # output_file = f"processed_{os.path.splitext(input_filename)[0]}.pkl" # Dynamic output name
         # try:
         #     combined_results = {
-        #         "extracted_data": all_tables_data, # Maybe save raw too
         #         "processed_tables": processed_tables,
-        #         "aggregated_sqft": global_aggregated_sqft_results # Save the global map
+        #         "aggregation_mode": aggregation_mode_used,
+        #         "workbook_filename": input_filename,
+        #         "worksheet_name": actual_sheet_name,
+        #         "standard_aggregation_results": global_standard_aggregated_sqft_results if aggregation_mode_used == 'standard' else {},
+        #         "custom_aggregation_results": global_custom_aggregation_results if aggregation_mode_used == 'custom' else {}
         #     }
         #     with open(output_file, 'wb') as f_pickle:
         #         pickle.dump(combined_results, f_pickle)
@@ -260,21 +236,18 @@ def run_invoice_automation():
         # except Exception as pickle_e:
         #     logging.error(f"Failed to save data to pickle file {output_file}: {pickle_e}")
 
+
         logging.info("--- Invoice Automation Finished Successfully ---")
 
     except FileNotFoundError as e:
         logging.error(f"Input file error: {e}")
-        # Potentially add specific user guidance here
     except RuntimeError as e:
-        # Catch specific errors raised for flow control (no headers, mapping fail, etc.)
         logging.error(f"Processing halted due to critical error: {e}")
     except Exception as e:
-        # Catch any other unexpected errors during setup or processing flow
         logging.error(f"An unexpected error occurred in the main script execution: {e}", exc_info=True)
     finally:
-        # --- Clean up ---
         if handler:
-            handler.close() # Release workbook reference
+            handler.close()
         logging.info("--- Automation Run Complete ---")
 
 

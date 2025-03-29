@@ -1,7 +1,9 @@
+# --- START OF FILE config.py ---
+
 # --- START OF FULL FILE: config.py ---
 
 # --- File Configuration ---
-INPUT_EXCEL_FILE = "test.xlsx" # Or specific name for this format
+INPUT_EXCEL_FILE = "25001.xlsx" # Or specific name for this format, e.g., "JF_Data_2024.xlsx"
 # Specify sheet name, or None to use the active sheet
 SHEET_NAME = None
 # OUTPUT_PICKLE_FILE = "invoice_data.pkl" # Example for future use
@@ -25,6 +27,7 @@ TARGET_HEADERS_MAP = {
     "gross": ["gross weight", "毛重", "gross"],       # Primary English: 'gross weight', Primary Chinese: '毛重'
     "unit": ["unit price", "单价", "price", "unit"],          # Primary English: 'unit price', Primary Chinese: '单价'
     "sqft": ["sqft", "出货数量 (sf)"],      # Primary English: 'sqft', Primary Chinese: '出货数量 (sf)' (Assuming this specific text)
+    "amount": ["amount", "金额"],            # Primary English: 'amount', Primary Chinese: '金额' # Ensure this is present and mapped
 
     # --- Less Certain Canonical Names ---
     "cbm": ["cbm", "材积"],                # Primary English: 'cbm', Primary Chinese: '材积' (Verify '材积' is correct/common)
@@ -43,7 +46,7 @@ TARGET_HEADERS_MAP = {
     "pallet_count": ["pallet count", "拖数"],# Primary English: 'pallet count', Primary Chinese: '拖数'
     "manual_no": ["manual number", "手册号"], # Primary English: 'manual number', Primary Chinese: '手册号'
     "remarks": ["remarks", "备注"],          # Primary English: 'remarks', Primary Chinese: '备注'
-    "amount": ["amount", "金额"],            # Primary English: 'amount', Primary Chinese: '金额'
+    # 'amount' is already defined above
 
     # Add any other essential headers here following the variations list format
 }
@@ -62,5 +65,13 @@ COLUMNS_TO_DISTRIBUTE = ["net", "gross", "cbm"] # Include 'cbm' if you want to d
 
 # The canonical header name of the column used for proportional distribution
 DISTRIBUTION_BASIS_COLUMN = "pcs"
+
+# --- Aggregation Strategy Configuration ---
+# List or Tuple of *workbook filename* prefixes (case-sensitive) that trigger CUSTOM aggregation.
+# Custom aggregation sums 'sqft' and 'amount' based ONLY on 'po' and 'item'.
+# Standard aggregation sums 'sqft' based on 'po', 'item', and 'unit'.
+# Example: If INPUT_EXCEL_FILE is "JF_Report_Q1.xlsx", it will match "JF".
+CUSTOM_AGGREGATION_WORKBOOK_PREFIXES = ("JF", "MOTO") # Renamed Variable
+
 
 # --- END OF FULL FILE: config.py ---
