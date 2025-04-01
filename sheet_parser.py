@@ -1,305 +1,296 @@
-# --- START OF FULL FILE: sheet_parser.py ---
+import openpyxl
+import os
+import math
+import json # Added for JSON loading
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.worksheet import Worksheet # Optional: for type hinting
+from typing import List, Dict, Any, Optional # Optional: for type hinting
+import traceback # For printing detailed errors
 
-import re
-import logging
-from typing import Dict, List, Optional, Tuple, Any # For type hinting
-
-# Import config values (consider passing them as arguments for more flexibility)
-from config import (
-    TARGET_HEADERS_MAP,
-    HEADER_SEARCH_ROW_RANGE,
-    HEADER_SEARCH_COL_RANGE,
-    HEADER_IDENTIFICATION_PATTERN,
-    STOP_EXTRACTION_ON_EMPTY_COLUMN,
-    MAX_DATA_ROWS_TO_SCAN,
-    DISTRIBUTION_BASIS_COLUMN, # Ensure these are available
-    COLUMNS_TO_DISTRIBUTE     # Ensure these are available
-)
-
-def find_all_header_rows(sheet, search_pattern, row_range, col_range) -> List[int]:
+def add_table_to_sheet(
+    ws: Worksheet,
+    start_row: int,
+    header_rows: List[List[Any]],
+    # label_data removed - labels are now part of data_rows
+    data_rows: List[List[Any]],
+    footer_config: Dict[str, Any]
+    # label_order removed
+) -> int:
     """
-    Finds all 1-indexed row numbers containing a header based on a pattern.
-    Returns a list of row numbers, sorted in ascending order.
+    Inserts a table structure (header, data, footer with SUM formulas)
+    into a worksheet at start_row, shifting existing rows down.
+    Assumes labels like 'VENDOR#:' are included in the first column of data_rows.
+
+    Args:
+        ws: The openpyxl worksheet object to write to.
+        start_row: The row number *before* which to insert the table.
+        header_rows: List of lists for header rows.
+        data_rows: List of lists for the main data (including any labels in col 1).
+        footer_config: Dict for footer settings. Example:
+                       {'keywords': ["TOTAL:"], 'calculate_cols': [5, 6],
+                        'pre_footer_rows': [[None,'Comment',None]], # Static rows *before* totals
+                        'static_rows': [[None, 'Comment', None]]} # Static rows *after* totals
+
+    Returns:
+        The row number immediately after the inserted table.
+        Returns start_row if an error occurs.
     """
-    header_rows: List[int] = []
     try:
-        # Compile the regex pattern once
-        regex = re.compile(search_pattern, re.IGNORECASE)
-        # Determine search boundaries, ensuring they don't exceed sheet dimensions
-        max_row_to_search = min(row_range, sheet.max_row)
-        max_col_to_search = min(col_range, sheet.max_column)
+        # --- Calculate total rows needed ---
+        num_header_rows = len(header_rows)
+        num_data_rows = len(data_rows)
+        # Re-introduced pre_footer_rows calculation
+        num_pre_footer_rows = len(footer_config.get('pre_footer_rows', [])) # Rows *before* totals
+        num_main_footer_rows = 1 if footer_config.get('keywords') or footer_config.get('calculate_cols') else 0
+        num_static_footer_rows = len(footer_config.get('static_rows', [])) # Rows *after* totals
+        # Adjusted total calculation
+        total_table_rows = num_header_rows + num_data_rows + num_pre_footer_rows + num_main_footer_rows + num_static_footer_rows
 
-        logging.info(f"[find_all_header_rows] Searching for headers using pattern '{search_pattern}' in rows 1-{max_row_to_search}, cols 1-{max_col_to_search}")
+        if total_table_rows <= 0:
+             print("Warning: No rows calculated for the table. Nothing inserted.")
+             return start_row
 
-        # Iterate through the specified range to find header cells
-        for r_idx in range(1, max_row_to_search + 1):
-            # Optimization: Check only necessary columns if pattern is specific
-            for c_idx in range(1, max_col_to_search + 1):
-                cell = sheet.cell(row=r_idx, column=c_idx)
-                if cell.value is not None:
-                    cell_value_str = str(cell.value).strip()
-                    # If the cell content matches the pattern, consider this a header row
-                    if regex.search(cell_value_str):
-                        logging.debug(f"[find_all_header_rows] Header pattern found in cell {cell.coordinate} (Row: {r_idx}). Adding row to list.")
-                        # Check if this row is already added to prevent duplicates if multiple cells match in the same row
-                        if r_idx not in header_rows:
-                            header_rows.append(r_idx)
-                        # Once a header is found in a row, move to the next row
-                        break # Break inner column loop
+        # --- Insert Blank Rows ---
+        ws.insert_rows(start_row, amount=total_table_rows)
 
-        # Sort the found header rows
-        header_rows.sort()
+        # --- Write into the newly inserted blank rows ---
+        current_row = start_row
+        num_header_cols = 0
+        if header_rows:
+            num_header_cols = len(header_rows[0])
 
-        if not header_rows:
-            logging.warning(f"[find_all_header_rows] Header pattern '{search_pattern}' not found within the search range.")
-        else:
-            # Log the final list found AT INFO level for clarity
-            logging.info(f"[find_all_header_rows] Found {len(header_rows)} potential header rows at: {header_rows}")
+        # --- Write Header Rows ---
+        for row_data in header_rows:
+            padded_row_data = row_data[:num_header_cols]
+            padded_row_data.extend([None] * (num_header_cols - len(padded_row_data)))
+            for col_idx, cell_value in enumerate(padded_row_data, start=1):
+                ws.cell(row=current_row, column=col_idx, value=cell_value)
+            # Handle merged cells example
+            if "Quantity" in row_data:
+                 try:
+                     q_idx = row_data.index("Quantity")
+                     if q_idx + 1 < len(row_data) and row_data[q_idx + 1] is None:
+                         col_index = q_idx + 1
+                         ws.merge_cells(start_row=current_row, start_column=col_index, end_row=current_row, end_column=col_index + 1)
+                 except ValueError: pass
+            current_row += 1
 
-        return header_rows
+        # --- Write Data Rows (now starts immediately after header) ---
+        table_data_start_row = current_row
+        for row_data in data_rows:
+            padded_row_data = row_data[:num_header_cols]
+            padded_row_data.extend([None] * (num_header_cols - len(padded_row_data)))
+            for col_idx, cell_value in enumerate(padded_row_data, start=1):
+                 # Attempt numeric conversion
+                 try:
+                     if isinstance(cell_value, str) and (cell_value.replace('.', '', 1).isdigit() or (cell_value.startswith('-') and cell_value[1:].replace('.', '', 1).isdigit())):
+                          cell_value_numeric = float(cell_value)
+                          cell_value = int(cell_value_numeric) if cell_value_numeric.is_integer() else cell_value_numeric
+                 except (ValueError, TypeError): pass
+                 ws.cell(row=current_row, column=col_idx, value=cell_value)
+            current_row += 1
+        table_data_end_row = current_row - 1
+
+        # --- Write Pre-Footer Static Rows (e.g., HS CODE) ---
+        # This section is re-introduced
+        pre_footer_rows = footer_config.get('pre_footer_rows', [])
+        for static_row_data in pre_footer_rows:
+             padded_row_data = static_row_data[:num_header_cols]
+             padded_row_data.extend([None] * (num_header_cols - len(padded_row_data)))
+             for col_idx, cell_value in enumerate(padded_row_data, start=1):
+                 ws.cell(row=current_row, column=col_idx, value=cell_value)
+             current_row += 1
+
+        # --- Write Main Footer Row (Totals) ---
+        if num_main_footer_rows > 0:
+            footer_row_content = [None] * num_header_cols
+            footer_keywords = footer_config.get('keywords', [])
+            if footer_keywords:
+                footer_row_content[0] = footer_keywords[0]
+
+            # Add SUM formulas
+            sum_col_indices = footer_config.get('calculate_cols', [])
+            if table_data_start_row <= table_data_end_row:
+                for col_index in sum_col_indices:
+                    if 1 <= col_index <= num_header_cols:
+                        col_letter = get_column_letter(col_index)
+                        formula = f"=SUM({col_letter}{table_data_start_row}:{col_letter}{table_data_end_row})"
+                        footer_row_content[col_index - 1] = formula
+                    else:
+                         print(f"Warning: Footer SUM col index {col_index} out of range (1-{num_header_cols}).")
+            else: # No data rows
+                for col_index in sum_col_indices:
+                     if 1 <= col_index <= num_header_cols: footer_row_content[col_index - 1] = 0
+
+            # Add item count
+            if header_rows:
+                try:
+                    item_col_name = next((name for name in ['ITEM N°', 'Product Code'] if name in header_rows[0]), None)
+                    if item_col_name:
+                        item_no_col_index = header_rows[0].index(item_col_name)
+                        footer_row_content[item_no_col_index] = f"{len(data_rows)} ITEMS"
+                except (ValueError, IndexError):
+                     print("Warning: Could not determine item column for item count.")
+
+            # Write the footer row
+            for col_idx, cell_value in enumerate(footer_row_content, start=1):
+                 ws.cell(row=current_row, column=col_idx, value=cell_value)
+            current_row += 1
+
+        # --- Write Post-Footer Static Rows ---
+        # These rows appear *after* the main totals row
+        static_footer_rows = footer_config.get('static_rows', [])
+        for static_row_data in static_footer_rows:
+             padded_row_data = static_row_data[:num_header_cols]
+             padded_row_data.extend([None] * (num_header_cols - len(padded_row_data)))
+             for col_idx, cell_value in enumerate(padded_row_data, start=1):
+                 ws.cell(row=current_row, column=col_idx, value=cell_value)
+             current_row += 1
+
+        return current_row
+
     except Exception as e:
-        logging.error(f"[find_all_header_rows] Error finding header rows: {e}", exc_info=True)
-        return []
-
-def map_columns_to_headers(sheet, header_row: int, col_range: int) -> Dict[str, int]:
-    """
-    Maps canonical header names to their 1-indexed column numbers based on the
-    header row content, prioritizing the first match found based on TARGET_HEADERS_MAP order.
-    (Uses the variation -> canonical lookup for clarity)
-
-    Args:
-        sheet: The openpyxl worksheet object.
-        header_row: The 1-indexed row number containing the headers.
-        col_range: The maximum number of columns to search for headers.
-
-    Returns:
-        A dictionary mapping canonical names (str) to column indices (int).
-    """
-    if header_row is None or header_row < 1:
-        logging.error("[map_columns_to_headers] Invalid header_row provided for column mapping.")
-        return {}
-
-    column_mapping: Dict[str, int] = {}
-    processed_canonicals = set() # Track canonical names already assigned to a column
-    max_col_to_check = min(col_range, sheet.max_column)
-
-    logging.info(f"[map_columns_to_headers] Mapping columns based on header row {header_row} up to column {max_col_to_check}.")
-
-    # Build a reverse lookup: lowercase variation -> canonical name
-    variation_to_canonical_lookup: Dict[str, str] = {}
-    ambiguous_variations = set()
-    for canonical_name, variations in TARGET_HEADERS_MAP.items():
-        # Ensure variations is iterable, even if it's a single string
-        if isinstance(variations, str):
-            variations = [variations] # Treat single string as a list with one item
-        elif not hasattr(variations, '__iter__'): # Check if it's iterable but not string
-             logging.error(f"[map_columns_to_headers] Config Error: Value for canonical name '{canonical_name}' in TARGET_HEADERS_MAP is not a list or string: {variations}. Skipping this canonical.")
-             continue
-
-        for variation in variations:
-            variation_lower = str(variation).lower().strip()
-            if not variation_lower: continue
-
-            if variation_lower in variation_to_canonical_lookup and variation_to_canonical_lookup[variation_lower] != canonical_name:
-                 if variation_lower not in ambiguous_variations:
-                      logging.warning(f"[map_columns_to_headers] Config Issue: Header variation '{variation_lower}' mapped to multiple canonical names ('{variation_to_canonical_lookup[variation_lower]}', '{canonical_name}', etc.). Check TARGET_HEADERS_MAP. Using first encountered mapping.")
-                      ambiguous_variations.add(variation_lower)
-                 # Decide on behavior: either overwrite or keep first. Keeping first based on warning.
-                 # variation_to_canonical_lookup[variation_lower] = canonical_name # <-- would overwrite
-            else:
-                 variation_to_canonical_lookup[variation_lower] = canonical_name
+        print(f"--- ERROR occurred while inserting table at row {start_row} ---")
+        print(f"Error details: {e}")
+        traceback.print_exc()
+        return start_row
 
 
-    # Iterate through Excel columns and map using the lookup
-    for col_idx in range(1, max_col_to_check + 1):
-        cell = sheet.cell(row=header_row, column=col_idx)
-        # Use .value directly; openpyxl handles data types
-        cell_value = cell.value
-        actual_header_text = str(cell_value).lower().strip() if cell_value is not None else ""
+# --- Main Execution Logic ---
+if __name__ == "__main__":
 
-        if not actual_header_text:
-            # Log empty header cells at DEBUG level
-            logging.debug(f"[map_columns_to_headers] Cell {cell.coordinate} in header row {header_row} is empty or None.")
-            continue
+    json_input_filename = "test.json"
+    output_filename = "tables_from_json_corrected.xlsx"
 
-        matched_canonical = variation_to_canonical_lookup.get(actual_header_text)
+    # --- 1. Load JSON Data ---
+    if not os.path.exists(json_input_filename):
+        print(f"Error: JSON input file '{json_input_filename}' not found.")
+        exit()
+    try:
+        with open(json_input_filename, 'r', encoding='utf-8') as f:
+            json_data = json.load(f)
+        print(f"Successfully loaded data from '{json_input_filename}'")
+    except Exception as e:
+        print(f"Error loading or parsing JSON file '{json_input_filename}': {e}")
+        traceback.print_exc(); exit()
 
-        if matched_canonical:
-            if matched_canonical not in processed_canonicals:
-                column_mapping[matched_canonical] = col_idx
-                processed_canonicals.add(matched_canonical)
-                # Log successful mapping at INFO level
-                logging.info(f"[map_columns_to_headers] Mapped column {col_idx} (Header Text: '{cell.value}') -> Canonical: '{matched_canonical}'")
-            else:
-                # Log duplicate canonical mapping as warning
-                logging.warning(f"[map_columns_to_headers] Duplicate Canonical Mapping: Canonical name '{matched_canonical}' (from Excel header '{cell.value}' in Col {col_idx}) was already mapped to Col {column_mapping.get(matched_canonical)}. Ignoring this duplicate column for '{matched_canonical}'.")
-        else:
-             # Log headers found in Excel but not matching any variation at DEBUG level
-             logging.debug(f"[map_columns_to_headers] Excel header '{cell.value}' (Col {col_idx}) in row {header_row} did not match any known variations in TARGET_HEADERS_MAP.")
+    # --- 2. Prepare Workbook ---
+    if os.path.exists(output_filename):
+        try: os.remove(output_filename); print(f"Removed previous output file: '{output_filename}'")
+        except Exception as e: print(f"Warning: Could not remove existing file '{output_filename}': {e}")
 
+    try:
+        wb = openpyxl.Workbook()
+        sheet_name = json_data.get('metadata', {}).get('worksheet_name', 'Inserted Tables Report')
+        sheet_name = sheet_name[:31].replace('[', '').replace(']', '').replace('*', '').replace('?', '').replace(':', '').replace('\\', '').replace('/', '')
+        ws = wb.active; ws.title = sheet_name
+        print(f"Created workbook with sheet: '{ws.title}'")
+    except Exception as e: print(f"Error creating workbook: {e}"); traceback.print_exc(); exit()
 
-    if not column_mapping:
-        logging.warning(f"[map_columns_to_headers] No target headers were successfully mapped in row {header_row}. Check Excel headers and TARGET_HEADERS_MAP content.")
-    else:
-        # Check for essential columns needed later
-        required = set()
-        if DISTRIBUTION_BASIS_COLUMN:
-            required.add(DISTRIBUTION_BASIS_COLUMN)
-        if COLUMNS_TO_DISTRIBUTE:
-            required.update(COLUMNS_TO_DISTRIBUTE)
-        # Also check essentials for SQFT aggregation if known
-        required.update(['po', 'item', 'unit', 'sqft'])
+    # Add initial content (optional)
+    ws['A1'] = f"Report: {json_data.get('metadata', {}).get('workbook_filename', 'JSON Data')}"
+    ws['A2'] = f"Sheet: {ws.title}"; ws['A3'] = ""
 
-        missing = required - set(column_mapping.keys())
-        if missing:
-             # This is important, log as WARNING
-             logging.warning(f"[map_columns_to_headers] Mapping complete for row {header_row}, but MISSING essential canonical mappings needed for processing: {missing}. Subsequent steps might fail or be incomplete.")
-        else:
-             logging.info(f"[map_columns_to_headers] All essential columns ({required}) appear to be mapped successfully for header row {header_row}.")
+    # --- 3. Process and Insert Tables from JSON ---
+    next_row_to_insert = 4 # Start inserting after initial content
 
+    if 'processed_tables_data' not in json_data or not isinstance(json_data['processed_tables_data'], dict):
+         print("Error: JSON data missing 'processed_tables_data' dictionary."); exit()
 
-    return column_mapping
+    # Define the static labels that should appear in the first column of the first few data rows
+    static_labels_in_data = ["VENDOR#:", "Des : LEATHER", "Case Qty :", "MADE IN CAMBODIA"]
 
+    for table_id, table_data in json_data['processed_tables_data'].items():
+        print(f"\n--- Processing Table ID: {table_id} ---")
+        if not isinstance(table_data, dict) or not table_data:
+            print(f"Warning: Skipping Table ID '{table_id}' due to invalid/empty data."); continue
 
-def extract_multiple_tables(sheet, header_rows: List[int], column_mapping: Dict[str, int]) -> Dict[int, Dict[str, List[Any]]]:
-    """
-    Extracts data for multiple tables defined by header_rows.
+        # --- 3a. Define Header & Map JSON keys ---
+        header_rows = [
+            ["Mark & N°", "P.O N°", "ITEM N°", "Description", "Quantity", None, "N.W (kgs)", "G.W (kgs)", "CBM", "Unit", "Amount"],
+            [None, None, None, None, "PCS", "SF", None, None, None, None, None]
+        ]
+        col_map = {
+            "po": 2, "item": 3, "reference_code": 4, "pcs": 5, "sqft": 6,
+            "net": 7, "gross": 8, "cbm": 9, "unit": 10, "amount": 11
+        }
+        expected_keys = list(col_map.keys())
+        if not all(key in table_data for key in expected_keys):
+             missing = [k for k in expected_keys if k not in table_data]
+             print(f"Warning: Skipping Table ID '{table_id}'. Missing keys: {missing}"); continue
+        num_cols = len(header_rows[0]) if header_rows else 0
 
-    Args:
-        sheet: The openpyxl worksheet object.
-        header_rows: A sorted list of 1-indexed header row numbers.
-        column_mapping: A dictionary mapping canonical header names to 1-indexed column numbers.
+        # --- 3b. Prepare data_rows (Integrate static labels) ---
+        data_rows = []
+        try:
+            first_key = next(iter(table_data))
+            num_rows = len(table_data[first_key])
 
-    Returns:
-        A dictionary where keys are table indices (1, 2, 3...) and values are
-        dictionaries representing each table's data ({'header': [values...]}).
-    """
-    if not header_rows:
-        logging.warning("[extract_multiple_tables] No header rows provided, cannot extract tables.")
-        return {}
-    if not column_mapping:
-        logging.error("[extract_multiple_tables] Column mapping is empty, cannot extract data meaningfully.")
-        return {}
-
-    all_tables_data: Dict[int, Dict[str, List[Any]]] = {}
-    stop_col_idx = column_mapping.get(STOP_EXTRACTION_ON_EMPTY_COLUMN) if STOP_EXTRACTION_ON_EMPTY_COLUMN else None
-    prefix = "[extract_multiple_tables]" # Log prefix
-
-    logging.info(f"{prefix} Starting extraction for {len(header_rows)} identified header(s): {header_rows}")
-
-    if STOP_EXTRACTION_ON_EMPTY_COLUMN:
-        if stop_col_idx:
-             logging.info(f"{prefix} Will stop reading rows within a table if column '{STOP_EXTRACTION_ON_EMPTY_COLUMN}' (Index: {stop_col_idx}) is empty.")
-        else:
-            logging.warning(f"{prefix} Stop column '{STOP_EXTRACTION_ON_EMPTY_COLUMN}' is configured but was not found in the column mapping. Extraction will rely solely on MAX_DATA_ROWS_TO_SCAN or the next header row.")
-
-    # Iterate through each identified header row to define table boundaries
-    for i, header_row in enumerate(header_rows):
-        table_index = i + 1
-        logging.info(f"{prefix} >>> Processing Header Row {header_row} as Table Index {table_index}")
-
-        start_data_row = header_row + 1
-
-        # Determine the end row for the current table's data
-        if i + 1 < len(header_rows):
-            # End before the next header row starts
-            max_possible_end_row = header_rows[i + 1]
-            logging.debug(f"{prefix} Table {table_index}: Next header found at row {max_possible_end_row}. Data extraction will stop before this row.")
-        else:
-            # Last table, potential end is sheet max row + 1
-            max_possible_end_row = sheet.max_row + 1
-            logging.debug(f"{prefix} Table {table_index}: This is the last header. Max possible end row: {max_possible_end_row} (Sheet max_row: {sheet.max_row})")
-
-        # Apply MAX_DATA_ROWS_TO_SCAN limit relative to the start_data_row
-        scan_limit_row = start_data_row + MAX_DATA_ROWS_TO_SCAN
-        # Actual end row is the minimum of the next header, scan limit, and sheet end (+1)
-        end_data_row = min(max_possible_end_row, scan_limit_row)
-
-        # Adjust if start row is already beyond end row (e.g., two headers immediately adjacent)
-        if start_data_row >= end_data_row:
-            logging.warning(f"{prefix} Table {table_index}: Start data row ({start_data_row}) is not before calculated end data row ({end_data_row}). No data rows will be extracted for this table.")
-            # Store empty structure and continue to next header
-            all_tables_data[table_index] = {key: [] for key in column_mapping.keys()}
-            continue
-
-
-        logging.info(f"{prefix} Table {table_index}: Extracting Data Rows {start_data_row} to {end_data_row - 1} (Header: {header_row}, LimitNextHeader: {max_possible_end_row}, LimitScan: {scan_limit_row})")
-
-        current_table_data: Dict[str, List[Any]] = {key: [] for key in column_mapping.keys()}
-        rows_extracted_for_table = 0
-        last_row_processed = start_data_row - 1 # Track the last row index processed
-        stop_condition_met = False # Flag if stop column caused early exit
-
-        # Extract data row by row for the current table
-        for current_row in range(start_data_row, end_data_row):
-            last_row_processed = current_row # Update last processed row
-
-            # Check stopping condition based on designated empty column
-            if stop_col_idx:
-                stop_cell = sheet.cell(row=current_row, column=stop_col_idx)
-                stop_cell_value = stop_cell.value
-                # Consider empty if None or an empty string after stripping
-                is_empty = stop_cell_value is None or (isinstance(stop_cell_value, str) and not stop_cell_value.strip())
-                if is_empty:
-                    logging.info(f"{prefix} Stopping extraction for Table {table_index} at row {current_row}: Empty cell found in stop column '{STOP_EXTRACTION_ON_EMPTY_COLUMN}' (Col {stop_col_idx}).")
-                    stop_condition_met = True
-                    break # Stop processing rows for *this* table
-
-            # Extract data for all mapped columns in this row
-            row_has_data = False # Check if the row has any data at all in mapped columns
-            logging.debug(f"{prefix} Table {table_index}, Reading row {current_row}:") # Row-level debug
-            for header, col_idx in column_mapping.items():
-                cell = sheet.cell(row=current_row, column=col_idx)
-                cell_value = cell.value # Get value using openpyxl's type handling
-                # Strip leading/trailing whitespace from strings ONLY
-                if isinstance(cell_value, str):
-                    processed_value = cell_value.strip()
+            for i in range(num_rows):
+                row = [None] * num_cols # Initialize row
+                # Set the first column label if applicable for this row index
+                if i < len(static_labels_in_data):
+                    row[0] = static_labels_in_data[i]
                 else:
-                    processed_value = cell_value # Keep numbers, dates, None, etc. as is
+                    row[0] = None # No static label for this data row
 
-                current_table_data[header].append(processed_value)
-                logging.debug(f"{prefix}   Col '{header}' ({col_idx}): Value='{processed_value}' (Type: {type(processed_value).__name__})") # Cell-level debug
-                # Check if this specific cell has meaningful data
-                if processed_value is not None and processed_value != "":
-                    row_has_data = True
+                # Populate the rest of the row from JSON data using col_map
+                for key, col_idx in col_map.items():
+                    if col_idx > num_cols: continue
+                    if i < len(table_data[key]):
+                         row[col_idx - 1] = table_data[key][i]
+                    else:
+                         print(f"Warning: Data missing for key '{key}' at index {i} in Table '{table_id}'.")
+                         row[col_idx - 1] = None
+                data_rows.append(row)
 
-            # Log if a row seems entirely empty across mapped columns
-            if not row_has_data:
-                logging.debug(f"{prefix} Table {table_index}, Row {current_row}: No data found in any mapped columns for this row.")
-                # Decide if you want to STOP on a fully empty row (could be risky if there are intentional gaps)
-                # if STOP_ON_FULLY_EMPTY_ROW_CONFIG: break
+        except StopIteration: print(f"Warning: Table '{table_id}' empty. Skipping."); continue
+        except Exception as e: print(f"Error transforming data for Table '{table_id}': {e}"); traceback.print_exc(); continue
 
-            rows_extracted_for_table += 1
+        # --- 3c. Define Footer Configuration ---
+        # Define the HS Code row to be inserted *before* the totals
+        hs_code_row = [None, None, None, "HS.CODE: 4107.XX.XX"] + [None]*(num_cols-4) # Adjust column index if needed
 
-        # Log if MAX_DATA_ROWS_TO_SCAN limit was hit
-        # This happens if the loop finished *and* the last row processed was the limit boundary
-        # *and* the stop condition wasn't the reason for finishing early.
-        if not stop_condition_met and last_row_processed == scan_limit_row - 1 and rows_extracted_for_table >= MAX_DATA_ROWS_TO_SCAN:
-             logging.warning(f"{prefix} Reached MAX_DATA_ROWS_TO_SCAN limit ({MAX_DATA_ROWS_TO_SCAN}) for Table {table_index} at row {last_row_processed}. Extraction might be incomplete for this table.")
+        footer_config = {
+            'keywords': [f"TOTALS (Table {table_id}):"],
+            'calculate_cols': [
+                col_map['pcs'], col_map['sqft'], col_map['net'],
+                col_map['gross'], col_map['cbm'], col_map['amount']
+             ],
+             'pre_footer_rows': [ hs_code_row ], # HS Code row before totals
+            'static_rows': [ # Optional rows *after* the totals
+                 [None] * num_cols, # Add empty row after totals
+                 ]
+        }
 
-        # --- Store results ---
-        logging.debug(f"{prefix} Finished row scanning loop for Table {table_index}. Rows processed in loop: {rows_extracted_for_table}.")
-        if rows_extracted_for_table > 0:
-            # Verify list lengths (should always match if extraction logic is correct)
-            list_lengths = {hdr: len(lst) for hdr, lst in current_table_data.items()}
-            if len(set(list_lengths.values())) > 1:
-                 logging.error(f"{prefix} !!! Internal Error: List lengths inconsistent after extracting Table {table_index}. Lengths: {list_lengths}. Storing data as is, but review logic.")
-            elif list(list_lengths.values())[0] != rows_extracted_for_table:
-                 logging.error(f"{prefix} !!! Internal Error: List length ({list(list_lengths.values())[0]}) does not match rows extracted count ({rows_extracted_for_table}) for Table {table_index}. Storing data, but review logic.")
+        # --- 3d. Call add_table_to_sheet ---
+        print(f"Inserting table for ID '{table_id}' before row {next_row_to_insert}...")
+        try:
+            # Call the function
+            next_row_after_insertion = add_table_to_sheet(
+                ws,
+                next_row_to_insert,
+                header_rows,
+                data_rows,
+                footer_config
+            )
+            print(f"Table ID '{table_id}' finished. Next content would start at row {next_row_after_insertion}")
+            next_row_to_insert = next_row_after_insertion + 1 # Add spacing
 
-            all_tables_data[table_index] = current_table_data
-            logging.info(f"{prefix} Successfully stored {rows_extracted_for_table} rows of data for Table Index {table_index} in the results dictionary.")
-            logging.debug(f"{prefix} Current keys in all_tables_data after adding Table {table_index}: {list(all_tables_data.keys())}")
-        else:
-            # Store empty dict even if no rows found
-            all_tables_data[table_index] = current_table_data # Contains empty lists
-            logging.info(f"{prefix} No data rows were extracted or met criteria for Table {table_index} (Header row {header_row}). Storing empty structure for this table index.")
-            logging.debug(f"{prefix} Current keys in all_tables_data after adding empty Table {table_index}: {list(all_tables_data.keys())}")
+        except Exception as insert_error:
+             print(f"--- FAILED to insert Table ID '{table_id}' ---"); print(f"Error: {insert_error}"); traceback.print_exc()
+             next_row_to_insert += 1 # Increment minimally
 
-        logging.debug(f"{prefix} <<< Finished processing Header Row {header_row} (Table Index {table_index}).")
+    # --- 4. Save the final workbook ---
+    try:
+        wb.save(output_filename)
+        print(f"\n--- Workbook saved successfully: '{output_filename}' ---")
+        print(f"Full path: {os.path.abspath(output_filename)}")
+    except Exception as e:
+        print(f"\n--- ERROR saving workbook: {e} ---"); traceback.print_exc()
+    finally:
+        if wb:
+             try: wb.close()
+             except Exception: pass
 
-
-    logging.info(f"{prefix} Completed extraction process. Final dictionary contains data for {len(all_tables_data)} table index(es): {list(all_tables_data.keys())}")
-    return all_tables_data
-
-# --- END OF FULL FILE: sheet_parser.py ---
+    print("\n--- Script finished ---")
