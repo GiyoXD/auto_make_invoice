@@ -1,0 +1,4 @@
+*.json
+*.xlsx
+*.txt
+__pycache__/
