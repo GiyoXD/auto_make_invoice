@@ -34,6 +34,7 @@ TARGET_HEADERS_MAP = {
     "desc": ["description", "品名规格"],      # Primary English: 'description', Primary Chinese: '品名规格'
     "inv_no": ["invoice no", "发票号码"],    # Primary English: 'invoice no', Primary Chinese: '发票号码'
     "inv_date": ["invoice date", "发票日期"], # Primary English: 'invoice date', Primary Chinese: '发票日期'
+    "inv_ref": ["ref", "invoice ref", "ref no"],
 
     # --- Other Found Headers ---
     "batch_no": ["batch number", "批次号"],  # Primary English: 'batch number', Primary Chinese: '批次号'
@@ -43,7 +44,7 @@ TARGET_HEADERS_MAP = {
     "production_order_no": ["production order number", "生产单号"], # Primary English: 'production order number', Primary Chinese: '生产单号'
     "reference_code": ["reference code", "ttx编号"], # Primary English: 'reference code', Primary Chinese: 'ttx编号' (Verify 'ttx编号')
     "level": ["grade", "等级"],              # Primary English: 'grade', Primary Chinese: '等级'
-    "pallet_count": ["pallet count", "拖数"],# Primary English: 'pallet count', Primary Chinese: '拖数'
+    "pallet_count": ["pallet count", "拖数", "pallet"],# Primary English: 'pallet count', Primary Chinese: '拖数'
     "manual_no": ["manual number", "手册号"], # Primary English: 'manual number', Primary Chinese: '手册号'
     "remarks": ["remarks", "备注"],          # Primary English: 'remarks', Primary Chinese: '备注'
     # 'amount' is already defined above
