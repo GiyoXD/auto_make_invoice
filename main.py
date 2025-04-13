@@ -32,7 +32,7 @@ FOB_INTER_CHUNK_SEPARATOR = "\n"  # Separator between groups (e.g., newline) [ci
 # UPDATED Type Alias to reflect new key structures
 InitialAggregationResults = Union[
     Dict[Tuple[Any, Any, Optional[decimal.Decimal], Optional[str]], Dict[str, decimal.Decimal]], # Standard Result (PO, Item, Price, Desc)
-    Dict[Tuple[Any, Any, Optional[str]], Dict[str, decimal.Decimal]]                             # Custom Result (PO, Item, Desc)
+    Dict[Tuple[Any, Any, Optional[str], None], Dict[str, decimal.Decimal]]                             # Custom Result (PO, Item, Desc, None) - UPDATED
 ]
 # Type alias for the FOB compounding result structure
 FobCompoundingResult = Dict[str, Union[str, decimal.Decimal]]
@@ -92,9 +92,9 @@ def perform_fob_compounding(
                 if len(key) == 4: po_key_val, item_key_val, _, _ = key # Unpack first two
                 else: raise ValueError(f"Invalid standard key length ({len(key)}), expected 4")
             elif aggregation_mode == 'custom':
-                 # UPDATED: Expecting 3 elements now (PO, Item, Desc)
-                 if len(key) == 3: po_key_val, item_key_val, _ = key # Unpack first two
-                 else: raise ValueError(f"Invalid custom key length ({len(key)}), expected 3")
+                 # UPDATED: Expecting 4 elements now (PO, Item, Desc, None)
+                 if len(key) == 4: po_key_val, item_key_val, _, _ = key # Unpack first two, ignore last two
+                 else: raise ValueError(f"Invalid custom key length ({len(key)}), expected 4")
             else:
                 logging.error(f"{prefix} Unknown aggregation mode '{aggregation_mode}' passed. Halting compounding.")
                 return None # Indicate critical error
@@ -219,7 +219,7 @@ def run_invoice_automation():
     # Global dictionaries for initial aggregation results
     # UPDATED Type Hints for new key structures
     global_standard_aggregation_results: Dict[Tuple[Any, Any, Optional[decimal.Decimal], Optional[str]], Dict[str, decimal.Decimal]] = {}
-    global_custom_aggregation_results: Dict[Tuple[Any, Any, Optional[str]], Dict[str, decimal.Decimal]] = {}
+    global_custom_aggregation_results: Dict[Tuple[Any, Any, Optional[str], None], Dict[str, decimal.Decimal]] = {} # UPDATED Type Hint
     # Global variable for the final single FOB compounded result
     global_fob_compounded_result: Optional[FobCompoundingResult] = None
 

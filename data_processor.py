@@ -533,19 +533,20 @@ def aggregate_standard_by_po_item_price(
 # *** Custom Aggregation Function (MODIFIED to include DESCRIPTION key) ***
 def aggregate_custom_by_po_item(
     processed_data: Dict[str, List[Any]],
-    # UPDATED TYPE HINT: Key is now 3 elements
-    global_custom_aggregation_map: Dict[Tuple[Any, Any, Optional[str]], Dict[str, decimal.Decimal]] # Added Optional[str] for description
-) -> Dict[Tuple[Any, Any, Optional[str]], Dict[str, decimal.Decimal]]:
+    # UPDATED TYPE HINT: Key is now 4 elements (PO, Item, Desc, None)
+    global_custom_aggregation_map: Dict[Tuple[Any, Any, Optional[str], None], Dict[str, decimal.Decimal]]
+) -> Dict[Tuple[Any, Any, Optional[str], None], Dict[str, decimal.Decimal]]:
     """
     CUSTOM Aggregation: Aggregates 'sqft' and 'amount' values based on unique
-    combinations of 'po', 'item', AND 'description'.
+    combinations of 'po', 'item', AND 'description'. Uses a 4-element key
+    (PO, Item, Description, None) for structural consistency.
     Updates the global_custom_aggregation_map in place.
 
     Args:
         processed_data: Dictionary representing the data of the current table.
         global_custom_aggregation_map: The dictionary holding the cumulative custom
                                        aggregation results.
-                                       Key: (po, item, description)
+                                       Key: (po, item, description, None)
                                        Value: Dict{'sqft_sum': Decimal, 'amount_sum': Decimal}.
 
     Returns:
@@ -649,8 +650,8 @@ def aggregate_custom_by_po_item(
 
         # logging.debug(f"{log_row_context}: Key parts - PO Key='{po_key}', Item Key='{item_key}', Desc Key='{description_key}'") # Reduced verbosity
 
-        # UPDATED Key: (PO, Item, Description)
-        key = (po_key, item_key, description_key)
+        # UPDATED Key: (PO, Item, Description, None) - Add None as 4th element
+        key = (po_key, item_key, description_key, None)
         # logging.debug(f"{log_row_context}: Generated Key Tuple = {key}") # Reduced verbosity
 
         # Convert SQFT to Decimal for summation (default to 0 if fails/None)
@@ -689,7 +690,7 @@ def aggregate_custom_by_po_item(
     logging.info(f"{prefix} Finished processing {rows_processed_this_table} rows for this table.")
     logging.info(f"{prefix} SQFT values successfully converted/defaulted for {successful_conversions_sqft} rows.")
     logging.info(f"{prefix} Amount values successfully converted/defaulted for {successful_conversions_amount} rows.")
-    logging.info(f"{prefix} Global custom aggregation map now contains {len(aggregated_results)} unique (PO, Item, Description) keys.")
+    logging.info(f"{prefix} Global custom aggregation map now contains {len(aggregated_results)} unique (PO, Item, Description, None) keys.")
 
     # Log the state of the map at DEBUG level after processing this table
     # logging.debug(f"{prefix} Global Custom Aggregated Results Dictionary (after this table):\n{pprint.pformat(aggregated_results)}") # Keep DEBUG for detailed tracing if needed
