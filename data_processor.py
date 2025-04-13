@@ -379,30 +379,32 @@ def distribute_values(
     return processed_data # Return the dictionary with modified lists
 
 
-# *** Standard Aggregation Function (MODIFIED to handle SQFT and AMOUNT) ***
-def aggregate_standard_by_po_item_price( # Renamed for clarity
+# *** Standard Aggregation Function (MODIFIED to handle SQFT, AMOUNT, and DESCRIPTION key) ***
+def aggregate_standard_by_po_item_price(
     processed_data: Dict[str, List[Any]],
-    # UPDATED TYPE HINT: Value is now a Dict storing sums
-    global_aggregation_map: Dict[Tuple[Any, Any, Optional[decimal.Decimal]], Dict[str, decimal.Decimal]]
-) -> Dict[Tuple[Any, Any, Optional[decimal.Decimal]], Dict[str, decimal.Decimal]]:
+    # UPDATED TYPE HINT: Key is now 4 elements, Value is Dict storing sums
+    global_aggregation_map: Dict[Tuple[Any, Any, Optional[decimal.Decimal], Optional[str]], Dict[str, decimal.Decimal]] # Added Optional[str] for description
+) -> Dict[Tuple[Any, Any, Optional[decimal.Decimal], Optional[str]], Dict[str, decimal.Decimal]]:
     """
     STANDARD Aggregation: Aggregates 'sqft' AND 'amount' values based on unique
-    combinations of 'po', 'item', and 'unit' price. Updates the global_aggregation_map in place.
+    combinations of 'po', 'item', 'unit' price, AND 'description'.
+    Updates the global_aggregation_map in place.
 
     Args:
         processed_data: Dictionary representing the data of the current table.
         global_aggregation_map: The dictionary holding the cumulative aggregation results.
-                                  Value is Dict{'sqft_sum': Decimal, 'amount_sum': Decimal}.
+                                  Key: (po, item, price, description)
+                                  Value: Dict{'sqft_sum': Decimal, 'amount_sum': Decimal}.
 
     Returns:
         The updated global_aggregation_map.
     """
     aggregated_results = global_aggregation_map
-    # UPDATED: Add 'amount' to required columns
-    required_cols = ['po', 'item', 'unit', 'sqft', 'amount']
-    prefix = "[aggregate_standard]" # Changed log prefix for clarity
+    # UPDATED: Add 'description' to required columns (handle its absence later)
+    required_cols = ['po', 'item', 'unit', 'sqft', 'amount'] # Keep description optional for now
+    prefix = "[aggregate_standard]"
 
-    logging.debug(f"{prefix} Updating global STANDARD aggregation (SQFT & Amount) with new table data.")
+    logging.debug(f"{prefix} Updating global STANDARD aggregation (SQFT & Amount by PO/Item/Price/Desc) with new table data.")
     logging.debug(f"{prefix} Size of global map BEFORE processing this table: {len(aggregated_results)}")
 
     # --- Input Validation ---
@@ -415,12 +417,21 @@ def aggregate_standard_by_po_item_price( # Renamed for clarity
         logging.warning(f"{prefix} Cannot perform STANDARD aggregation: Missing required columns {missing_cols}. Skipping aggregation for this table.")
         return aggregated_results
 
+    # --- Check for optional 'description' column ---
+    has_description_col = 'description' in processed_data
+    if has_description_col and not isinstance(processed_data.get('description'), list):
+        logging.warning(f"{prefix} 'description' column exists but is not a list. Will use None for description keys.")
+        has_description_col = False # Treat as missing if not a list
+    elif not has_description_col:
+        logging.info(f"{prefix} 'description' column not found or is invalid. Will use None for description keys.")
+
     # Safely get lists and check types - Use get() with default empty list
     po_list = processed_data.get('po', [])
     item_list = processed_data.get('item', [])
     unit_list = processed_data.get('unit', [])
     sqft_list = processed_data.get('sqft', [])
-    amount_list = processed_data.get('amount', []) # Get amount list
+    amount_list = processed_data.get('amount', [])
+    description_list = processed_data.get('description', []) if has_description_col else [] # Get description list if valid
 
     # Use length of 'po' list as the reference number of rows
     num_rows = len(po_list)
@@ -428,16 +439,21 @@ def aggregate_standard_by_po_item_price( # Renamed for clarity
 
     # Check for length consistency across all required lists
     all_lists_to_check = {'item': item_list, 'unit': unit_list, 'sqft': sqft_list, 'amount': amount_list}
+    # Add description list to check only if it exists and is supposed to be used
+    if has_description_col:
+        all_lists_to_check['description'] = description_list
+
     if not all(len(lst) == num_rows for lst in all_lists_to_check.values()):
         lengths = {k: len(v) for k, v in all_lists_to_check.items()}
-        logging.error(f"{prefix} Data length mismatch! PO:{num_rows}, Others:{lengths}. Aborting standard aggregation for this table.")
+        lengths['po'] = num_rows # Add PO length for context
+        logging.error(f"{prefix} Data length mismatch! Lengths:{lengths}. Aborting standard aggregation for this table.")
         return aggregated_results
 
     if num_rows == 0:
         logging.info(f"{prefix} No data rows found in this table. Global map unchanged.")
         return aggregated_results
 
-    logging.info(f"{prefix} Processing {num_rows} rows for STANDARD aggregation (SQFT & Amount).")
+    logging.info(f"{prefix} Processing {num_rows} rows for STANDARD aggregation (SQFT & Amount by PO/Item/Price/Desc).")
 
     # --- Iterate and Aggregate ---
     rows_processed_this_table = 0
@@ -452,44 +468,50 @@ def aggregate_standard_by_po_item_price( # Renamed for clarity
         # Get raw values
         po_val, item_val = po_list[i], item_list[i]
         unit_price_raw, sqft_raw, amount_raw = unit_list[i], sqft_list[i], amount_list[i]
-        logging.debug(f"{log_row_context}: Raw values - PO='{po_val}', Item='{item_val}', Price='{unit_price_raw}', SQFT='{sqft_raw}', Amount='{amount_raw}'")
+        # Get description if available, else None
+        desc_raw = description_list[i] if has_description_col and i < len(description_list) else None
 
+        logging.debug(f"{log_row_context}: Raw values - PO='{po_val}', Item='{item_val}', Price='{unit_price_raw}', Desc='{desc_raw}', SQFT='{sqft_raw}', Amount='{amount_raw}'")
 
         # Prepare key components
         po_key = str(po_val).strip() if isinstance(po_val, str) else po_val
         item_key = str(item_val).strip() if isinstance(item_val, str) else item_val
+        description_key = str(desc_raw).strip() if isinstance(desc_raw, str) else desc_raw # Keep None as None
+        description_key = description_key if description_key else None # Ensure empty strings become None
+
         po_key = po_key if po_key is not None else "<MISSING_PO>"
         item_key = item_key if item_key is not None else "<MISSING_ITEM>"
+        # Description key can be None
 
         # Convert price to Decimal for the key
         price_dec = _convert_to_decimal(unit_price_raw, f"{log_row_context} price")
-        # Key remains (PO, Item, Price)
-        key = (po_key, item_key, price_dec)
+
+        # UPDATED Key: (PO, Item, Price, Description)
+        key = (po_key, item_key, price_dec, description_key)
         logging.debug(f"{log_row_context}: Generated Key Tuple = {key}")
 
 
         # Convert SQFT and Amount to Decimal for summation
         sqft_dec = _convert_to_decimal(sqft_raw, f"{log_row_context} SQFT")
         if sqft_dec is None:
-             logging.debug(f"{log_row_context}: SQFT value '{sqft_raw}' is None or failed conversion. Using 0.")
+             # logging.debug(f"{log_row_context}: SQFT value '{sqft_raw}' is None or failed conversion. Using 0.") # Reduced verbosity
              sqft_dec = decimal.Decimal(0)
         else:
              successful_conversions_sqft +=1
 
         amount_dec = _convert_to_decimal(amount_raw, f"{log_row_context} Amount")
         if amount_dec is None:
-            logging.debug(f"{log_row_context}: Amount value '{amount_raw}' is None or failed conversion. Using 0.")
+            # logging.debug(f"{log_row_context}: Amount value '{amount_raw}' is None or failed conversion. Using 0.") # Reduced verbosity
             amount_dec = decimal.Decimal(0)
         else:
             successful_conversions_amount +=1
 
-        logging.debug(f"{log_row_context}: Converted values - SQFT='{sqft_dec}', Amount='{amount_dec}'")
+        # logging.debug(f"{log_row_context}: Converted values - SQFT='{sqft_dec}', Amount='{amount_dec}'") # Reduced verbosity
 
-        # --- UPDATED LOGIC: Add to the global aggregate sums (SQFT & Amount) ---
-        # Get the current dictionary of sums for the key, or a default dict if key is new
+        # --- Add to the global aggregate sums (SQFT & Amount) ---
         current_sums = aggregated_results.get(key, {'sqft_sum': decimal.Decimal(0), 'amount_sum': decimal.Decimal(0)})
 
-        logging.debug(f"{log_row_context}: Sums for key {key} BEFORE add = {current_sums}")
+        # logging.debug(f"{log_row_context}: Sums for key {key} BEFORE add = {current_sums}") # Reduced verbosity
 
         # Update the sums
         current_sums['sqft_sum'] += sqft_dec
@@ -497,81 +519,103 @@ def aggregate_standard_by_po_item_price( # Renamed for clarity
 
         # Store the updated dictionary back into the global map
         aggregated_results[key] = current_sums
-        logging.debug(f"{log_row_context}: Global sums for key {key} AFTER add = {aggregated_results[key]}")
-        # logging.debug(f"{log_row_context} --- End Processing ---")
+        # logging.debug(f"{log_row_context}: Global sums for key {key} AFTER add = {aggregated_results[key]}") # Reduced verbosity
 
 
     logging.info(f"{prefix} Finished processing {rows_processed_this_table} rows.")
     logging.info(f"{prefix} SQFT values successfully converted/defaulted for {successful_conversions_sqft} rows.")
     logging.info(f"{prefix} Amount values successfully converted/defaulted for {successful_conversions_amount} rows.")
     logging.info(f"{prefix} Global standard aggregation map size: {len(aggregated_results)}")
-    logging.debug(f"{prefix} Global Standard Aggregated Results (End of Table):\n{pprint.pformat(aggregated_results)}")
+    # logging.debug(f"{prefix} Global Standard Aggregated Results (End of Table):\n{pprint.pformat(aggregated_results)}") # Keep DEBUG for detailed tracing if needed
     return aggregated_results
 
 
-# *** Custom Aggregation Function (Remains Unchanged) ***
+# *** Custom Aggregation Function (MODIFIED to include DESCRIPTION key) ***
 def aggregate_custom_by_po_item(
     processed_data: Dict[str, List[Any]],
-    global_custom_aggregation_map: Dict[Tuple[Any, Any], Dict[str, decimal.Decimal]]
-) -> Dict[Tuple[Any, Any], Dict[str, decimal.Decimal]]:
+    # UPDATED TYPE HINT: Key is now 3 elements
+    global_custom_aggregation_map: Dict[Tuple[Any, Any, Optional[str]], Dict[str, decimal.Decimal]] # Added Optional[str] for description
+) -> Dict[Tuple[Any, Any, Optional[str]], Dict[str, decimal.Decimal]]:
     """
     CUSTOM Aggregation: Aggregates 'sqft' and 'amount' values based on unique
-    combinations of 'po' and 'item'. Updates the global_custom_aggregation_map in place.
+    combinations of 'po', 'item', AND 'description'.
+    Updates the global_custom_aggregation_map in place.
 
     Args:
         processed_data: Dictionary representing the data of the current table.
         global_custom_aggregation_map: The dictionary holding the cumulative custom
-                                       aggregation results. The value is a dict:
-                                       {'sqft_sum': Decimal, 'amount_sum': Decimal}.
+                                       aggregation results.
+                                       Key: (po, item, description)
+                                       Value: Dict{'sqft_sum': Decimal, 'amount_sum': Decimal}.
 
     Returns:
         The updated global_custom_aggregation_map.
     """
     aggregated_results = global_custom_aggregation_map
-    # Required columns for this aggregation
+    # Required columns for this aggregation (Description is optional)
     required_cols = ['po', 'item', 'sqft', 'amount']
-    prefix = "[aggregate_custom]" # Log prefix for this function
+    prefix = "[aggregate_custom]"
 
-    logging.debug(f"{prefix} Updating global CUSTOM aggregation (SQFT & Amount) with new table data.")
+    logging.debug(f"{prefix} Updating global CUSTOM aggregation (SQFT & Amount by PO/Item/Desc) with new table data.")
     logging.debug(f"{prefix} Size of global custom map BEFORE processing this table: {len(aggregated_results)}")
 
     # --- Input Validation ---
     if not isinstance(processed_data, dict):
         logging.error(f"{prefix} Input 'processed_data' is not a dictionary. Cannot aggregate.")
-        return aggregated_results # Return the unmodified global map
+        return aggregated_results
 
     missing_cols = [col for col in required_cols if col not in processed_data]
     if missing_cols:
-        # Log as warning, might still proceed if some rows have data, but it's risky
-        logging.warning(f"{prefix} Cannot perform full CUSTOM aggregation: Missing required columns {missing_cols} in input dictionary keys: {list(processed_data.keys())}. Will attempt to process rows but results might be incomplete.")
-        # Decide if we should return early or proceed. Let's proceed but with caution.
-        # return aggregated_results
+        logging.warning(f"{prefix} Cannot perform full CUSTOM aggregation: Missing required columns {missing_cols}. Proceeding cautiously.")
+        # Allow proceeding, rows without needed data will be skipped or defaulted
+
+    # --- Check for optional 'description' column ---
+    has_description_col = 'description' in processed_data
+    if has_description_col and not isinstance(processed_data.get('description'), list):
+        logging.warning(f"{prefix} 'description' column exists but is not a list. Will use None for description keys.")
+        has_description_col = False
+    elif not has_description_col:
+        logging.info(f"{prefix} 'description' column not found or is invalid. Will use None for description keys.")
+
 
     # Safely get lists and check types - Use get() with default empty list
     po_list = processed_data.get('po', [])
     item_list = processed_data.get('item', [])
     sqft_list = processed_data.get('sqft', [])
-    amount_list = processed_data.get('amount', []) # Get amount list
+    amount_list = processed_data.get('amount', [])
+    description_list = processed_data.get('description', []) if has_description_col else []
 
-    # Use length of 'po' list as the reference number of rows (assuming it's core)
-    num_rows = len(po_list)
-    logging.debug(f"{prefix} Input data contains lists. Number of rows based on 'po' list: {num_rows}")
+    # Use length of 'po' list as reference (handle potential missing 'po'?)
+    num_rows = len(po_list) if po_list else 0
+    if not po_list and (item_list or sqft_list or amount_list or description_list):
+        # If PO is missing but others exist, try using another core list length
+        core_lists = [l for l in [item_list, sqft_list, amount_list] if l]
+        if core_lists:
+            num_rows = len(core_lists[0])
+            logging.warning(f"{prefix} 'po' list missing or empty, using length of another list ({num_rows}) as reference.")
+        else:
+            logging.warning(f"{prefix} Core lists ('po', 'item', 'sqft', 'amount') seem missing or empty. Cannot reliably determine row count.")
+            num_rows = 0 # Cannot proceed safely
 
-    # Check for length consistency across all required lists found
-    # Only check lengths for lists that were actually found
+    logging.debug(f"{prefix} Determined number of rows: {num_rows}")
+
+    # Check for length consistency across all *found* required lists + description if present
     all_lists = {'po': po_list, 'item': item_list, 'sqft': sqft_list, 'amount': amount_list}
-    found_lists = {k: v for k, v in all_lists.items() if k not in missing_cols}
+    if has_description_col:
+        all_lists['description'] = description_list
+
+    found_lists = {k: v for k, v in all_lists.items() if k in processed_data and isinstance(processed_data[k], list)}
 
     if not all(len(lst) == num_rows for lst in found_lists.values()):
         lengths = {k: len(v) for k, v in found_lists.items()}
-        logging.error(f"{prefix} Data length mismatch for found columns! PO:{len(po_list)}, Others:{lengths}. Aborting custom aggregation for this table.")
-        return aggregated_results # Return the unmodified global map
-
-    if num_rows == 0:
-        logging.info(f"{prefix} No data rows found in this table (num_rows is 0 based on 'po' list). Global custom aggregation map remains unchanged.")
+        logging.error(f"{prefix} Data length mismatch for found columns! Ref:{num_rows}, Found:{lengths}. Aborting custom aggregation for this table.")
         return aggregated_results
 
-    logging.info(f"{prefix} Processing {num_rows} rows from this table to update global CUSTOM aggregation.")
+    if num_rows == 0:
+        logging.info(f"{prefix} No data rows found in this table. Global custom aggregation map remains unchanged.")
+        return aggregated_results
+
+    logging.info(f"{prefix} Processing {num_rows} rows from this table to update global CUSTOM aggregation (by PO/Item/Desc).")
 
     # --- Iterate and Aggregate ---
     rows_processed_this_table = 0
@@ -581,31 +625,38 @@ def aggregate_custom_by_po_item(
     for i in range(num_rows):
         rows_processed_this_table += 1
         log_row_context = f"{prefix} Table Row index {i}"
-        logging.debug(f"{log_row_context} --- Processing ---")
+        # logging.debug(f"{log_row_context} --- Processing ---") # Reduced verbosity
 
-        # Get raw values (handle potential missing lists from initial check)
-        po_val = po_list[i] if po_list else None
-        item_val = item_list[i] if item_list else None
-        sqft_raw = sqft_list[i] if sqft_list else None
-        amount_raw = amount_list[i] if amount_list else None # Get raw amount
+        # Get raw values (handle potential missing lists safely using get with default None)
+        po_val = po_list[i] if i < len(po_list) else None
+        item_val = item_list[i] if i < len(item_list) else None
+        sqft_raw = sqft_list[i] if i < len(sqft_list) else None
+        amount_raw = amount_list[i] if i < len(amount_list) else None
+        desc_raw = description_list[i] if has_description_col and i < len(description_list) else None
 
-        logging.debug(f"{log_row_context}: Raw values - PO='{po_val}', Item='{item_val}', SQFT='{sqft_raw}', Amount='{amount_raw}'")
+        # logging.debug(f"{log_row_context}: Raw values - PO='{po_val}', Item='{item_val}', Desc='{desc_raw}', SQFT='{sqft_raw}', Amount='{amount_raw}'") # Reduced verbosity
 
         # Prepare the key components (Handle None, strip strings)
         po_key = str(po_val).strip() if isinstance(po_val, str) else po_val
         item_key = str(item_val).strip() if isinstance(item_val, str) else item_val
+        description_key = str(desc_raw).strip() if isinstance(desc_raw, str) else desc_raw
+        description_key = description_key if description_key else None # Ensure empty strings become None
+
+
         po_key = po_key if po_key is not None else "<MISSING_PO>"
         item_key = item_key if item_key is not None else "<MISSING_ITEM>"
-        logging.debug(f"{log_row_context}: Key parts - PO Key='{po_key}', Item Key='{item_key}'")
+        # Description key can be None
 
-        # Create the unique key tuple (PO, Item)
-        key = (po_key, item_key)
-        logging.debug(f"{log_row_context}: Generated Key Tuple = {key}")
+        # logging.debug(f"{log_row_context}: Key parts - PO Key='{po_key}', Item Key='{item_key}', Desc Key='{description_key}'") # Reduced verbosity
+
+        # UPDATED Key: (PO, Item, Description)
+        key = (po_key, item_key, description_key)
+        # logging.debug(f"{log_row_context}: Generated Key Tuple = {key}") # Reduced verbosity
 
         # Convert SQFT to Decimal for summation (default to 0 if fails/None)
         sqft_dec = _convert_to_decimal(sqft_raw, f"{log_row_context} SQFT")
         if sqft_dec is None:
-            logging.debug(f"{log_row_context}: SQFT value '{sqft_raw}' is None or failed conversion. Using 0.")
+            # logging.debug(f"{log_row_context}: SQFT value '{sqft_raw}' is None or failed conversion. Using 0.") # Reduced verbosity
             sqft_dec = decimal.Decimal(0)
         else:
              successful_conversions_sqft +=1
@@ -613,18 +664,17 @@ def aggregate_custom_by_po_item(
         # Convert Amount to Decimal for summation (default to 0 if fails/None)
         amount_dec = _convert_to_decimal(amount_raw, f"{log_row_context} Amount")
         if amount_dec is None:
-            logging.debug(f"{log_row_context}: Amount value '{amount_raw}' is None or failed conversion. Using 0.")
+            # logging.debug(f"{log_row_context}: Amount value '{amount_raw}' is None or failed conversion. Using 0.") # Reduced verbosity
             amount_dec = decimal.Decimal(0)
         else:
             successful_conversions_amount +=1
 
-        logging.debug(f"{log_row_context}: Converted values - SQFT='{sqft_dec}', Amount='{amount_dec}'")
+        # logging.debug(f"{log_row_context}: Converted values - SQFT='{sqft_dec}', Amount='{amount_dec}'") # Reduced verbosity
 
-        # --- UPDATED LOGIC: Add to the global aggregate sums (SQFT & Amount) ---
-        # Get the current dictionary of sums for the key, or a default dict if key is new
+        # --- Add to the global aggregate sums (SQFT & Amount) ---
         current_sums = aggregated_results.get(key, {'sqft_sum': decimal.Decimal(0), 'amount_sum': decimal.Decimal(0)})
 
-        logging.debug(f"{log_row_context}: Sums for key {key} BEFORE add = {current_sums}")
+        # logging.debug(f"{log_row_context}: Sums for key {key} BEFORE add = {current_sums}") # Reduced verbosity
 
         # Update the sums
         current_sums['sqft_sum'] += sqft_dec
@@ -632,17 +682,17 @@ def aggregate_custom_by_po_item(
 
         # Store the updated dictionary back into the global map
         aggregated_results[key] = current_sums
-        logging.debug(f"{log_row_context}: Global sums for key {key} AFTER add = {aggregated_results[key]}")
-        # logging.debug(f"{log_row_context} --- End Processing ---")
+        # logging.debug(f"{log_row_context}: Global sums for key {key} AFTER add = {aggregated_results[key]}") # Reduced verbosity
+
 
     # --- Log summary for this table's contribution ---
     logging.info(f"{prefix} Finished processing {rows_processed_this_table} rows for this table.")
     logging.info(f"{prefix} SQFT values successfully converted/defaulted for {successful_conversions_sqft} rows.")
     logging.info(f"{prefix} Amount values successfully converted/defaulted for {successful_conversions_amount} rows.")
-    logging.info(f"{prefix} Global custom aggregation map now contains {len(aggregated_results)} unique (PO, Item) keys.")
+    logging.info(f"{prefix} Global custom aggregation map now contains {len(aggregated_results)} unique (PO, Item, Description) keys.")
 
     # Log the state of the map at DEBUG level after processing this table
-    logging.debug(f"{prefix} Global Custom Aggregated Results Dictionary (after this table):\n{pprint.pformat(aggregated_results)}")
+    # logging.debug(f"{prefix} Global Custom Aggregated Results Dictionary (after this table):\n{pprint.pformat(aggregated_results)}") # Keep DEBUG for detailed tracing if needed
 
     return aggregated_results # Return the modified global map
 
