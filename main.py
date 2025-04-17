@@ -26,7 +26,7 @@ except ImportError:
         HEADER_SEARCH_COL_RANGE = (1, 30) # Example
         COLUMNS_TO_DISTRIBUTE = [] # Example
         DISTRIBUTION_BASIS_COLUMN = "SQFT" # Example
-        CUSTOM_AGGREGATION_WORKBOOK_PREFIXES = ["CUST"] # Example
+        CUSTOM_AGGREGATION_WORKBOOK_PREFIXES = ["CUST"] # eeExample
     cfg = DummyConfig()
     logging.warning("Using dummy config values due to import failure.")
 
@@ -65,7 +65,7 @@ def perform_fob_compounding(
     """
     Performs FOB Compounding from standard or custom aggregation results.
     This function *always* runs after the initial aggregation step.
-    It combines all unique POs and Items into formatted SINGLE strings
+    It combines all unique POs, Items, and Descriptions into formatted SINGLE strings
     (chunked based on constants).
     It sums all SQFT and Amount values. Returns a single dictionary record.
     Args:
@@ -74,8 +74,8 @@ def perform_fob_compounding(
         aggregation_mode: String ('standard' or 'custom') indicating how to parse
                           the keys of initial_results.
     Returns:
-        A single dictionary with 'combined_po', 'combined_item', 'total_sqft',
-        'total_amount', or a default structure if input is empty/invalid.
+        A single dictionary with 'combined_po', 'combined_item', 'combined_description',
+        'total_sqft', 'total_amount', or a default structure if input is empty/invalid.
         Returns None only on critical internal errors.
     """
     prefix = "[perform_fob_compounding]"
@@ -87,12 +87,14 @@ def perform_fob_compounding(
         return {
             'combined_po': '',
             'combined_item': '',
+            'combined_description': '',  # Add empty description field
             'total_sqft': decimal.Decimal(0),
             'total_amount': decimal.Decimal(0)
         }
 
     unique_pos = set()
     unique_items = set()
+    unique_descriptions = set()  # Add set for descriptions
     total_sqft = decimal.Decimal(0)
     total_amount = decimal.Decimal(0)
 
@@ -102,55 +104,58 @@ def perform_fob_compounding(
     for key, sums_dict in initial_results.items():
         po_key_val = None
         item_key_val = None
-        # Note: Description from key is ignored for compounding, but needs unpacking
+        desc_key_val = None  # Add variable for description
 
-        # Extract PO and Item from the key based on the initial aggregation mode
+        # Extract PO, Item, and Description from the key based on the initial aggregation mode
         try:
             if aggregation_mode == 'standard':
-                 # UPDATED: Expecting 4 elements now (PO, Item, Price, Desc)
-                if len(key) == 4: po_key_val, item_key_val, _, _ = key # Unpack first two
+                # Standard key structure: (PO, Item, Price, Description)
+                if len(key) == 4: po_key_val, item_key_val, _, desc_key_val = key
                 else: raise ValueError(f"Invalid standard key length ({len(key)}), expected 4")
             elif aggregation_mode == 'custom':
-                 # UPDATED: Expecting 4 elements now (PO, Item, Desc, None)
-                 if len(key) == 4: po_key_val, item_key_val, _, _ = key # Unpack first two, ignore last two
-                 else: raise ValueError(f"Invalid custom key length ({len(key)}), expected 4")
+                # Custom key structure: (PO, Item, None, Description)
+                if len(key) == 4: po_key_val, item_key_val, _, desc_key_val = key
+                else: raise ValueError(f"Invalid custom key length ({len(key)}), expected 4")
             else:
                 logging.error(f"{prefix} Unknown aggregation mode '{aggregation_mode}' passed. Halting compounding.")
                 return None # Indicate critical error
-        except (ValueError, TypeError, IndexError) as e: # Catch more specific errors
-             logging.warning(f"{prefix} Error unpacking key {key} (type: {type(key)}) in '{aggregation_mode}' mode: {e}. Skipping entry.")
-             continue
+        except (ValueError, TypeError, IndexError) as e:
+            logging.warning(f"{prefix} Error unpacking key {key} (type: {type(key)}) in '{aggregation_mode}' mode: {e}. Skipping entry.")
+            continue
 
-        # --- Collect unique POs/Items ---
+        # --- Collect unique POs/Items/Descriptions ---
         # Ensure conversion to string, handle None gracefully
         po_str = str(po_key_val) if po_key_val is not None else "<MISSING_PO>"
         item_str = str(item_key_val) if item_key_val is not None else "<MISSING_ITEM>"
+        desc_str = str(desc_key_val) if desc_key_val is not None else ""
+        
         unique_pos.add(po_str)
         unique_items.add(item_str)
+        unique_descriptions.add(desc_str)  # Add description to set
 
         # --- Sum numeric values ---
         sqft_sum = sums_dict.get('sqft_sum', decimal.Decimal(0))
         amount_sum = sums_dict.get('amount_sum', decimal.Decimal(0))
         # Validate types before summing
         if not isinstance(sqft_sum, decimal.Decimal):
-             logging.warning(f"{prefix} Invalid SQFT sum type for key {key}: {type(sqft_sum)}. Using 0.")
-             sqft_sum = decimal.Decimal(0)
+            logging.warning(f"{prefix} Invalid SQFT sum type for key {key}: {type(sqft_sum)}. Using 0.")
+            sqft_sum = decimal.Decimal(0)
         if not isinstance(amount_sum, decimal.Decimal):
-             logging.warning(f"{prefix} Invalid Amount sum type for key {key}: {type(amount_sum)}. Using 0.")
-             amount_sum = decimal.Decimal(0)
+            logging.warning(f"{prefix} Invalid Amount sum type for key {key}: {type(amount_sum)}. Using 0.")
+            amount_sum = decimal.Decimal(0)
         total_sqft += sqft_sum
         total_amount += amount_sum
 
     logging.debug(f"{prefix} Finished processing entries.")
-    logging.debug(f"{prefix} Unique POs collected ({len(unique_pos)}): {unique_pos if len(unique_pos) < 20 else str(list(unique_pos)[:20]) + '...'}") # Truncate long logs
-    logging.debug(f"{prefix} Unique Items collected ({len(unique_items)}): {unique_items if len(unique_items) < 20 else str(list(unique_items)[:20]) + '...'}") # Truncate long logs
+    logging.debug(f"{prefix} Unique POs collected ({len(unique_pos)}): {unique_pos if len(unique_pos) < 20 else str(list(unique_pos)[:20]) + '...'}")
+    logging.debug(f"{prefix} Unique Items collected ({len(unique_items)}): {unique_items if len(unique_items) < 20 else str(list(unique_items)[:20]) + '...'}")
+    logging.debug(f"{prefix} Unique Descriptions collected ({len(unique_descriptions)}): {unique_descriptions if len(unique_descriptions) < 20 else str(list(unique_descriptions)[:20]) + '...'}")
 
     # --- Final Combination with Chunking ---
     # Convert sets to lists and sort alphabetically/numerically
     sorted_pos = sorted(list(unique_pos))
     sorted_items = sorted(list(unique_items))
-    # logging.debug(f"{prefix} Sorted PO list before chunking: {sorted_pos}") # Reduced verbosity
-    # logging.debug(f"{prefix} Sorted Item list before chunking: {sorted_items}") # Reduced verbosity
+    sorted_descriptions = sorted(list(unique_descriptions))
 
     # Helper function for chunking and joining
     def format_chunks(items: List[str], chunk_size: int, intra_sep: str, inter_sep: str) -> str:
@@ -176,15 +181,18 @@ def perform_fob_compounding(
         FOB_INTRA_CHUNK_SEPARATOR,
         FOB_INTER_CHUNK_SEPARATOR
     )
-
-    # DEBUG LOGGING remains useful
-    # logging.debug(f"{prefix} Final combined_po_string (Type: {type(combined_po_string)}): '{combined_po_string}'") # Reduced verbosity
-    # logging.debug(f"{prefix} Final combined_item_string (Type: {type(combined_item_string)}): '{combined_item_string}'") # Reduced verbosity
+    combined_description_string = format_chunks(
+        sorted_descriptions,
+        FOB_CHUNK_SIZE,
+        "\n",  # <<< Use NEWLINE as the INTRA-chunk separator for descriptions
+        FOB_INTER_CHUNK_SEPARATOR
+    )
 
     # Construct Result Dictionary
     fob_compounded_result: FobCompoundingResult = {
         'combined_po': combined_po_string,    # Now formatted with chunks
         'combined_item': combined_item_string, # Now formatted with chunks
+        'combined_description': combined_description_string,  # Add combined descriptions
         'total_sqft': total_sqft,
         'total_amount': total_amount
     }

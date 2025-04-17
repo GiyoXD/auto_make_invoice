@@ -21,17 +21,17 @@ HEADER_IDENTIFICATION_PATTERN = r"批次号|订单号|物料代码|总张数|净
 TARGET_HEADERS_MAP = {
     # --- Core Logic Canonical Names ---
     "po": ["po", "订单号"],                 # Primary English: 'po', Primary Chinese: '订单号'
-    "item": ["item no", "物料代码", 'item'],        # Primary English: 'item no', Primary Chinese: '物料代码'
-    "pcs": ["pcs", "总张数"],                # Primary English: 'pcs', Primary Chinese: '总张数'
+    "item": ["item no", "物料代码", 'item', "产品编号"],        # Primary English: 'item no', Primary Chinese: '物料代码'
+    "pcs": ["pcs", "总张数", "张数"],                # Primary English: 'pcs', Primary Chinese: '总张数'
     "net": ["net weight", "净重", "net"],          # Primary English: 'net weight', Primary Chinese: '净重'
-    "gross": ["gross weight", "毛重", "gross"],       # Primary English: 'gross weight', Primary Chinese: '毛重'
+    "gross": ["gross weight", "毛重", "gross", ],       # Primary English: 'gross weight', Primary Chinese: '毛重'
     "unit": ["unit price", "单价", "price", "unit"],          # Primary English: 'unit price', Primary Chinese: '单价'
-    "sqft": ["sqft", "出货数量 (sf)"],      # Primary English: 'sqft', Primary Chinese: '出货数量 (sf)' (Assuming this specific text)
-    "amount": ["amount", "金额"],            # Primary English: 'amount', Primary Chinese: '金额' # Ensure this is present and mapped
+    "sqft": ["sqft", "出货数量 (sf)", "尺数"],      # Primary English: 'sqft', Primary Chinese: '出货数量 (sf)' (Assuming this specific text)
+    "amount": ["amount", "金额", "总价"],            # Primary English: 'amount', Primary Chinese: '金额' # Ensure this is present and mapped
 
     # --- Less Certain Canonical Names ---
     "cbm": ["cbm", "材积"],                # Primary English: 'cbm', Primary Chinese: '材积' (Verify '材积' is correct/common)
-    "description": ["description", "品名规格"],      # Primary English: 'description', Primary Chinese: '品名规格'
+    "description": ["description", "品名规格", "产品编号"],      # Primary English: 'description', Primary Chinese: '品名规格'
     "inv_no": ["invoice no", "发票号码"],    # Primary English: 'invoice no', Primary Chinese: '发票号码'
     "inv_date": ["invoice date", "发票日期"], # Primary English: 'invoice date', Primary Chinese: '发票日期'
     "inv_ref": ["ref", "invoice ref", "ref no"],
@@ -44,9 +44,9 @@ TARGET_HEADERS_MAP = {
     "production_order_no": ["production order number", "生产单号"], # Primary English: 'production order number', Primary Chinese: '生产单号'
     "reference_code": ["reference code", "ttx编号"], # Primary English: 'reference code', Primary Chinese: 'ttx编号' (Verify 'ttx编号')
     "level": ["grade", "等级"],              # Primary English: 'grade', Primary Chinese: '等级'
-    "pallet_count": ["pallet count", "拖数", "pallet"],# Primary English: 'pallet count', Primary Chinese: '拖数'
+    "pallet_count": ["pallet count", "拖数", "PALLET", "件数"],# Primary English: 'pallet count', Primary Chinese: '拖数'
     "manual_no": ["manual number", "手册号"], # Primary English: 'manual number', Primary Chinese: '手册号'
-    "remarks": ["remarks", "备注"],          # Primary English: 'remarks', Primary Chinese: '备注'
+    "remarks": ["remarks", "备注", "Remark"],          # Primary English: 'remarks', Primary Chinese: '备注'
     # 'amount' is already defined above
 
     # Add any other essential headers here following the variations list format
