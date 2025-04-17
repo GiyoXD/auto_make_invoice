@@ -3,7 +3,7 @@
 # --- START OF FULL FILE: config.py ---
 
 # --- File Configuration ---
-INPUT_EXCEL_FILE = "test.xlsx" # Or specific name for this format, e.g., "JF_Data_2024.xlsx"
+INPUT_EXCEL_FILE = "JF.xlsx" # Or specific name for this format, e.g., "JF_Data_2024.xlsx"
 # Specify sheet name, or None to use the active sheet
 SHEET_NAME = None
 # OUTPUT_PICKLE_FILE = "invoice_data.pkl" # Example for future use
@@ -31,7 +31,7 @@ TARGET_HEADERS_MAP = {
 
     # --- Less Certain Canonical Names ---
     "cbm": ["cbm", "材积"],                # Primary English: 'cbm', Primary Chinese: '材积' (Verify '材积' is correct/common)
-    "desc": ["description", "品名规格"],      # Primary English: 'description', Primary Chinese: '品名规格'
+    "description": ["description", "品名规格"],      # Primary English: 'description', Primary Chinese: '品名规格'
     "inv_no": ["invoice no", "发票号码"],    # Primary English: 'invoice no', Primary Chinese: '发票号码'
     "inv_date": ["invoice date", "发票日期"], # Primary English: 'invoice date', Primary Chinese: '发票日期'
     "inv_ref": ["ref", "invoice ref", "ref no"],

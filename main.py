@@ -8,10 +8,29 @@ import decimal
 import os
 import json # Added for JSON output
 import datetime # <<< ADDED IMPORT for datetime handling
+import argparse # <<< ADDED IMPORT for argument parsing
+from pathlib import Path # <<< ADDED IMPORT for pathlib
 from typing import Dict, List, Any, Optional, Tuple, Union
 
 # Import from our refactored modules
-import config as cfg
+try:
+    import config as cfg # Keep config for fallback and other settings
+except ImportError:
+    logging.error("Failed to import config.py. Please ensure it exists and is configured.")
+    # Define dummy cfg values if needed for script to load, but it will likely fail later
+    class DummyConfig:
+        INPUT_EXCEL_FILE = "fallback_excel.xlsx" # Example placeholder
+        SHEET_NAME = "Sheet1"
+        HEADER_IDENTIFICATION_PATTERN = r"PO#" # Example
+        HEADER_SEARCH_ROW_RANGE = (1, 20) # Example
+        HEADER_SEARCH_COL_RANGE = (1, 30) # Example
+        COLUMNS_TO_DISTRIBUTE = [] # Example
+        DISTRIBUTION_BASIS_COLUMN = "SQFT" # Example
+        CUSTOM_AGGREGATION_WORKBOOK_PREFIXES = ["CUST"] # Example
+    cfg = DummyConfig()
+    logging.warning("Using dummy config values due to import failure.")
+
+
 from excel_handler import ExcelHandler
 import sheet_parser
 import data_processor # Includes all processing functions
@@ -206,32 +225,96 @@ def make_json_serializable(data):
     # Let the default handler in json.dumps deal with Decimal, datetime, etc.
     return data
 
-def run_invoice_automation():
-    """Main function to find tables, extract, and process data for each."""
+# <<< MODIFIED FUNCTION SIGNATURE >>>
+def run_invoice_automation(input_excel_override: Optional[str] = None, output_dir_override: Optional[str] = None):
+    """Main function to find tables, extract, and process data for each.
+       Uses input_excel_override if provided, otherwise falls back to cfg.INPUT_EXCEL_FILE.
+       Saves output JSON to output_dir_override if provided, otherwise uses CWD.
+    """
     logging.info("--- Starting Invoice Automation ---")
     handler = None
     actual_sheet_name = None
     input_filename = "Unknown"
+    input_filepath = None
+    output_dir = None
+
+    # --- Determine Input Excel File ---
+    if input_excel_override:
+        input_filepath = input_excel_override
+        logging.info(f"Using input Excel path from command line: {input_filepath}")
+    else:
+        try:
+            # Fallback to config if no override provided
+            input_filepath = cfg.INPUT_EXCEL_FILE
+            logging.info(f"Using input Excel path from config.py: {input_filepath}")
+        except AttributeError:
+             logging.error("INPUT_EXCEL_FILE not found in config.py and no command-line override provided.")
+             raise RuntimeError("Input Excel file path is missing.")
+        except Exception as e:
+            logging.error(f"Error accessing INPUT_EXCEL_FILE from config.py: {e}")
+            raise RuntimeError(f"Could not determine input Excel file path: {e}")
+
+    # Check if the determined filepath exists (relative to CWD or absolute)
+    if not os.path.isfile(input_filepath):
+         # Try resolving relative to the script's directory if not found in CWD
+        script_dir = os.path.dirname(__file__)
+        potential_path = os.path.join(script_dir, input_filepath)
+        if os.path.isfile(potential_path):
+            input_filepath = potential_path
+            logging.info(f"Resolved relative input path to script directory: {input_filepath}")
+        else:
+            logging.error(f"Input Excel file not found at path: {input_filepath}")
+            # Log CWD for debugging
+            logging.error(f"Current working directory: {os.getcwd()}")
+            if script_dir != os.getcwd():
+                 logging.error(f"Script directory: {script_dir}")
+            raise FileNotFoundError(f"Input Excel file not found: {input_filepath}")
+
+    # Get just the filename for logging and output naming
+    input_filename = os.path.basename(input_filepath)
+    logging.info(f"Processing workbook: {input_filename}")
+    # --- End Determine Input Excel File ---
+
+    # --- Determine Output Directory ---
+    if output_dir_override:
+        output_dir = Path(output_dir_override).resolve()
+        logging.info(f"Using output directory from command line: {output_dir}")
+        # Ensure the directory exists
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+             logging.error(f"Could not create or access output directory '{output_dir}': {e}")
+             raise RuntimeError(f"Invalid output directory specified: {output_dir}")
+    else:
+        # Default to current working directory if no override
+        output_dir = Path(os.getcwd())
+        logging.info(f"Using default output directory (CWD): {output_dir}")
+    # --- End Determine Output Directory ---
+
 
     processed_tables: Dict[int, Dict[str, Any]] = {}
     all_tables_data: Dict[int, Dict[str, List[Any]]] = {}
 
     # Global dictionaries for initial aggregation results
-    # UPDATED Type Hints for new key structures
     global_standard_aggregation_results: Dict[Tuple[Any, Any, Optional[decimal.Decimal], Optional[str]], Dict[str, decimal.Decimal]] = {}
-    global_custom_aggregation_results: Dict[Tuple[Any, Any, Optional[str], None], Dict[str, decimal.Decimal]] = {} # UPDATED Type Hint
+    global_custom_aggregation_results: Dict[Tuple[Any, Any, Optional[str], None], Dict[str, decimal.Decimal]] = {}
     # Global variable for the final single FOB compounded result
     global_fob_compounded_result: Optional[FobCompoundingResult] = None
 
     aggregation_mode_used = "standard" # Default, determines WHICH aggregation feeds FOB
 
-    # --- Determine Initial Aggregation Strategy ---
+    # --- Determine Initial Aggregation Strategy (based on the ACTUAL input filename) ---
     use_custom_aggregation_for_fob = False # Determines which map feeds FOB
-    # Ensure cfg.INPUT_EXCEL_FILE is accessible for filename check
     try:
-        input_filename = os.path.basename(cfg.INPUT_EXCEL_FILE)
+        # Use the now determined input_filename
         logging.info(f"Checking workbook filename '{input_filename}' to determine PRIMARY aggregation mode for FOB compounding.")
-        for prefix in cfg.CUSTOM_AGGREGATION_WORKBOOK_PREFIXES:
+        # Ensure CUSTOM_AGGREGATION_WORKBOOK_PREFIXES is defined in cfg
+        custom_prefixes = getattr(cfg, 'CUSTOM_AGGREGATION_WORKBOOK_PREFIXES', [])
+        if not isinstance(custom_prefixes, list):
+            logging.warning("cfg.CUSTOM_AGGREGATION_WORKBOOK_PREFIXES is not a list. Using empty list.")
+            custom_prefixes = []
+
+        for prefix in custom_prefixes:
              if input_filename.startswith(prefix):
                 use_custom_aggregation_for_fob = True # This workbook primarily uses custom for FOB
                 aggregation_mode_used = "custom"
@@ -241,19 +324,19 @@ def run_invoice_automation():
              logging.info(f"Workbook filename does not match custom prefixes. Will use STANDARD aggregation results for FOB compounding.")
              aggregation_mode_used = "standard"
     except Exception as e:
-        logging.error(f"Error accessing config or input filename for aggregation strategy: {e}")
+        logging.error(f"Error during aggregation strategy determination for filename '{input_filename}': {e}")
         logging.warning("Defaulting to STANDARD aggregation for FOB compounding due to error.")
         aggregation_mode_used = "standard"
         use_custom_aggregation_for_fob = False
-        input_filename = "ErrorDeterminingFilename"
     # ---------------------------------------------
 
     try:
         # --- Steps 1-4: Load, Find Headers, Map Columns, Extract Data ---
-        logging.info(f"Loading workbook: {cfg.INPUT_EXCEL_FILE}")
-        handler = ExcelHandler(cfg.INPUT_EXCEL_FILE)
+        # <<< USE THE DETERMINED input_filepath >>>
+        logging.info(f"Loading workbook from: {input_filepath}")
+        handler = ExcelHandler(input_filepath)
         sheet = handler.load_sheet(sheet_name=cfg.SHEET_NAME, data_only=True)
-        if sheet is None: raise RuntimeError(f"Failed to load sheet from '{cfg.INPUT_EXCEL_FILE}'.")
+        if sheet is None: raise RuntimeError(f"Failed to load sheet from '{input_filepath}'.")
         actual_sheet_name = sheet.title
         logging.info(f"Successfully loaded worksheet: '{actual_sheet_name}' from '{input_filename}'")
 
@@ -416,7 +499,7 @@ def run_invoice_automation():
             # Use the helper function to ensure serializability
             final_json_structure = {
                  "metadata": {
-                    "workbook_filename": input_filename,
+                    "workbook_filename": input_filename, # Use the actual input filename
                     "worksheet_name": actual_sheet_name,
                     "fob_compounding_input_mode": aggregation_mode_used, # Clarify which mode fed FOB
                     "fob_chunk_size": FOB_CHUNK_SIZE,
@@ -449,14 +532,18 @@ def run_invoice_automation():
                 logging.info(f"JSON output is large ({len(json_output_string)} chars). Logging preview:")
                 logging.info(json_output_string[:max_log_json_len] + "\n... (JSON output truncated in log)")
 
-            # Save the JSON to a file
-            json_output_filename = f"output_{os.path.splitext(input_filename)[0]}.json"
+            # --- MODIFIED: Save JSON using output_dir and simplified filename ---
+            input_stem = Path(input_filename).stem # Get filename without extension
+            json_output_filename = f"{input_stem}.json" # Simplified filename
+            output_json_path = output_dir / json_output_filename # Combine output dir and filename
+            logging.info(f"Determined output JSON path: {output_json_path}")
+            # --- END MODIFICATION ---
             try:
-                with open(json_output_filename, 'w', encoding='utf-8') as f_json:
+                with open(output_json_path, 'w', encoding='utf-8') as f_json:
                      f_json.write(json_output_string)
-                logging.info(f"Successfully saved JSON output to '{json_output_filename}'")
+                logging.info(f"Successfully saved JSON output to '{output_json_path}'")
             except IOError as io_err:
-                logging.error(f"Failed to write JSON output to file '{json_output_filename}': {io_err}")
+                logging.error(f"Failed to write JSON output to file '{output_json_path}': {io_err}")
             except Exception as write_err:
                  logging.error(f"An unexpected error occurred while writing JSON file: {write_err}", exc_info=True)
 
@@ -479,11 +566,31 @@ def run_invoice_automation():
 
 
 if __name__ == "__main__":
-    # Make sure config.py exists and defines necessary variables like:
-    # INPUT_EXCEL_FILE, SHEET_NAME, HEADER_IDENTIFICATION_PATTERN,
-    # HEADER_SEARCH_ROW_RANGE, HEADER_SEARCH_COL_RANGE,
-    # COLUMNS_TO_DISTRIBUTE, DISTRIBUTION_BASIS_COLUMN,
-    # CUSTOM_AGGREGATION_WORKBOOK_PREFIXES
-    run_invoice_automation()
+    # --- Argument Parsing ---
+    parser = argparse.ArgumentParser(description="Process an Excel invoice file to generate JSON data.")
+    parser.add_argument(
+        "--input-excel",
+        type=str,
+        default=None, # Default to None, indicating fallback to config.py
+        help="Path to the input Excel file. Overrides the value in config.py if provided."
+    )
+    # --- ADDED: Output directory argument ---
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None, # Default to None, indicating use CWD
+        help="Directory to save the output JSON file. Defaults to the current working directory."
+    )
+    # --- END ADD ---
+    args = parser.parse_args()
+    # --- End Argument Parsing ---
+
+    # --- Run the main logic ---
+    # Pass the parsed arguments to the main function
+    run_invoice_automation(
+        input_excel_override=args.input_excel,
+        output_dir_override=args.output_dir # Pass the output dir argument
+    )
+    # --- End Run Logic ---
 
 # --- END OF FULL FILE: main.py ---
