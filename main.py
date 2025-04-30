@@ -42,10 +42,9 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 MAX_LOG_DICT_LEN = 3000 # Max length for printing large dicts in logs (for DEBUG)
 
 # --- Constants for FOB Compounding Formatting ---
-FOB_CHUNK_SIZE = 2  # How many items per group (e.g., PO1\PO2) [cite: 1]
-FOB_INTRA_CHUNK_SEPARATOR = "\\"  # Separator within a group (e.g., backslash) [cite: 2]
-FOB_INTER_CHUNK_SEPARATOR = "\n"  # Separator between groups (e.g., newline) [cite: 2]
-
+FOB_CHUNK_SIZE = 2  # How many items per group (e.g., PO1\\PO2)
+FOB_INTRA_CHUNK_SEPARATOR = "\\"  # Separator within a group (e.g., DOUBLE BACKSLASH)
+FOB_INTER_CHUNK_SEPARATOR = "\n"  # Separator between groups (e.g., newline)
 
 # Type alias for the two possible initial aggregation structures
 # UPDATED Type Alias to reflect new key structures
@@ -56,149 +55,277 @@ InitialAggregationResults = Union[
 # Type alias for the FOB compounding result structure
 FobCompoundingResult = Dict[str, Union[str, decimal.Decimal]]
 
+# Type alias for the final FOB result (ALWAYS a split dict, but structure varies)
+FinalFobResultType = Dict[str, FobCompoundingResult]
+
 
 # *** FOB Compounding Function with Chunking ***
 def perform_fob_compounding(
     initial_results: InitialAggregationResults, # Type hint updated
     aggregation_mode: str # 'standard' or 'custom' -> Needed to parse input keys correctly
-) -> Optional[FobCompoundingResult]:
+) -> Optional[FinalFobResultType]: # <<< Return type is always Dict[str, ...]
     """
     Performs FOB Compounding from standard or custom aggregation results.
-    This function *always* runs after the initial aggregation step.
-    It combines all unique POs, Items, and Descriptions into formatted SINGLE strings
-    (chunked based on constants).
-    It sums all SQFT and Amount values. Returns a single dictionary record.
+    - If description data IS present: Performs BUFFALO split (Groups "1" & "2").
+      Uses FOB_CHUNK_SIZE=2 and FOB_INTRA_CHUNK_SEPARATOR='\\'.
+    - If description data IS NOT present: Performs PO Count split (Groups "1", "2", ...).
+      Uses NO_DESC_SPLIT_CHUNK_SIZE=8 and FOB_INTRA_CHUNK_SEPARATOR='\\'.
+      Calculates chunk-specific totals.
+
     Args:
-        initial_results: The dictionary from EITHER standard OR custom aggregation (determined by aggregation_mode).
-                         The key structure depends on the mode.
-        aggregation_mode: String ('standard' or 'custom') indicating how to parse
-                          the keys of initial_results.
+        initial_results: The dictionary from EITHER standard OR custom aggregation.
+        aggregation_mode: String ('standard' or 'custom') indicating key structure.
     Returns:
-        A single dictionary with 'combined_po', 'combined_item', 'combined_description',
-        'total_sqft', 'total_amount', or a default structure if input is empty/invalid.
-        Returns None only on critical internal errors.
+        - A dictionary keyed by group/chunk index ("1", "2", ...).
+        - Default structure (empty groups "1", "2") if input is empty.
+        - None on critical internal errors.
     """
     prefix = "[perform_fob_compounding]"
-    logging.info(f"{prefix} Starting FOB Compounding. Using input from '{aggregation_mode}' aggregation map.")
+    logging.info(f"{prefix} Starting FOB Compounding. Checking for descriptions to determine split type.")
 
-    # Handle empty input consistently
-    if not initial_results:
-        logging.warning(f"{prefix} Input aggregation results map is empty. Returning default zero/empty FOB record.")
+    # Helper function for creating a default empty group result
+    def default_group_result() -> FobCompoundingResult:
         return {
             'combined_po': '',
             'combined_item': '',
-            'combined_description': '',  # Add empty description field
+            'combined_description': '',
             'total_sqft': decimal.Decimal(0),
             'total_amount': decimal.Decimal(0)
         }
 
-    unique_pos = set()
-    unique_items = set()
-    unique_descriptions = set()  # Add set for descriptions
-    total_sqft = decimal.Decimal(0)
-    total_amount = decimal.Decimal(0)
+    # Handle empty input consistently -> returns default BUFFALO split dict
+    if not initial_results:
+        logging.warning(f"{prefix} Input aggregation results map is empty. Returning default empty FOB groups.")
+        return {
+            "1": default_group_result(), # Buffalo group
+            "2": default_group_result()  # Non-Buffalo group
+        }
 
-    logging.debug(f"{prefix} Processing {len(initial_results)} entries from initial aggregation.")
-
-    # Iterate through the initial results
-    for key, sums_dict in initial_results.items():
-        po_key_val = None
-        item_key_val = None
-        desc_key_val = None  # Add variable for description
-
-        # Extract PO, Item, and Description from the key based on the initial aggregation mode
+    # --- Check if any description data exists ---
+    any_description_present = False
+    for key in initial_results.keys():
+        desc_key_val = None
         try:
-            if aggregation_mode == 'standard':
-                # Standard key structure: (PO, Item, Price, Description)
-                if len(key) == 4: po_key_val, item_key_val, _, desc_key_val = key
-                else: raise ValueError(f"Invalid standard key length ({len(key)}), expected 4")
-            elif aggregation_mode == 'custom':
-                # Custom key structure: (PO, Item, None, Description)
-                if len(key) == 4: po_key_val, item_key_val, _, desc_key_val = key
-                else: raise ValueError(f"Invalid custom key length ({len(key)}), expected 4")
-            else:
-                logging.error(f"{prefix} Unknown aggregation mode '{aggregation_mode}' passed. Halting compounding.")
-                return None # Indicate critical error
-        except (ValueError, TypeError, IndexError) as e:
-            logging.warning(f"{prefix} Error unpacking key {key} (type: {type(key)}) in '{aggregation_mode}' mode: {e}. Skipping entry.")
-            continue
+            if aggregation_mode == 'standard' and len(key) == 4:
+                desc_key_val = key[3]
+            elif aggregation_mode == 'custom' and len(key) == 4:
+                desc_key_val = key[3]
+            elif len(key) >= 4: desc_key_val = key[3]
+            if desc_key_val is not None and str(desc_key_val).strip():
+                any_description_present = True
+                logging.debug(f"{prefix} Found description data. Will perform BUFFALO split.")
+                break
+        except (IndexError, TypeError): continue
 
-        # --- Collect unique POs/Items/Descriptions ---
-        # Ensure conversion to string, handle None gracefully
-        po_str = str(po_key_val) if po_key_val is not None else "<MISSING_PO>"
-        item_str = str(item_key_val) if item_key_val is not None else "<MISSING_ITEM>"
-        desc_str = str(desc_key_val) if desc_key_val is not None else ""
-        
-        unique_pos.add(po_str)
-        unique_items.add(item_str)
-        unique_descriptions.add(desc_str)  # Add description to set
-
-        # --- Sum numeric values ---
-        sqft_sum = sums_dict.get('sqft_sum', decimal.Decimal(0))
-        amount_sum = sums_dict.get('amount_sum', decimal.Decimal(0))
-        # Validate types before summing
-        if not isinstance(sqft_sum, decimal.Decimal):
-            logging.warning(f"{prefix} Invalid SQFT sum type for key {key}: {type(sqft_sum)}. Using 0.")
-            sqft_sum = decimal.Decimal(0)
-        if not isinstance(amount_sum, decimal.Decimal):
-            logging.warning(f"{prefix} Invalid Amount sum type for key {key}: {type(amount_sum)}. Using 0.")
-            amount_sum = decimal.Decimal(0)
-        total_sqft += sqft_sum
-        total_amount += amount_sum
-
-    logging.debug(f"{prefix} Finished processing entries.")
-    logging.debug(f"{prefix} Unique POs collected ({len(unique_pos)}): {unique_pos if len(unique_pos) < 20 else str(list(unique_pos)[:20]) + '...'}")
-    logging.debug(f"{prefix} Unique Items collected ({len(unique_items)}): {unique_items if len(unique_items) < 20 else str(list(unique_items)[:20]) + '...'}")
-    logging.debug(f"{prefix} Unique Descriptions collected ({len(unique_descriptions)}): {unique_descriptions if len(unique_descriptions) < 20 else str(list(unique_descriptions)[:20]) + '...'}")
-
-    # --- Final Combination with Chunking ---
-    # Convert sets to lists and sort alphabetically/numerically
-    sorted_pos = sorted(list(unique_pos))
-    sorted_items = sorted(list(unique_items))
-    sorted_descriptions = sorted(list(unique_descriptions))
-
-    # Helper function for chunking and joining
+    # Reusable helper function for formatting chunks
     def format_chunks(items: List[str], chunk_size: int, intra_sep: str, inter_sep: str) -> str:
         if not items:
             return ""
         processed_chunks = []
         for i in range(0, len(items), chunk_size):
-            chunk = items[i:i + chunk_size]
-            joined_chunk = intra_sep.join(chunk) # Join items within the chunk
+            chunk = [str(item) for item in items[i:i + chunk_size]]
+            joined_chunk = intra_sep.join(chunk)
             processed_chunks.append(joined_chunk)
-        return inter_sep.join(processed_chunks) # Join the chunks together
+        return inter_sep.join(processed_chunks)
 
-    # Apply the chunking format using configured constants
-    combined_po_string = format_chunks(
-        sorted_pos,
-        FOB_CHUNK_SIZE,
-        FOB_INTRA_CHUNK_SEPARATOR,
-        FOB_INTER_CHUNK_SEPARATOR
-    )
-    combined_item_string = format_chunks(
-        sorted_items,
-        FOB_CHUNK_SIZE,
-        FOB_INTRA_CHUNK_SEPARATOR,
-        FOB_INTER_CHUNK_SEPARATOR
-    )
-    combined_description_string = format_chunks(
-        sorted_descriptions,
-        FOB_CHUNK_SIZE,
-        "\n",  # <<< Use NEWLINE as the INTRA-chunk separator for descriptions
-        FOB_INTER_CHUNK_SEPARATOR
-    )
+    # --- Decide Execution Path --- #
 
-    # Construct Result Dictionary
-    fob_compounded_result: FobCompoundingResult = {
-        'combined_po': combined_po_string,    # Now formatted with chunks
-        'combined_item': combined_item_string, # Now formatted with chunks
-        'combined_description': combined_description_string,  # Add combined descriptions
-        'total_sqft': total_sqft,
-        'total_amount': total_amount
-    }
+    if any_description_present:
+        # --- Path 1: Descriptions ARE present -> BUFFALO Split Aggregation (Chunk Size 2) ---
+        logging.info(f"{prefix} Performing BUFFALO split aggregation (Chunk Size: {FOB_CHUNK_SIZE}).")
+        # Initialize accumulators for BUFFALO group ("1")
+        buffalo_pos = set()
+        buffalo_items = set()
+        buffalo_descriptions = set()
+        buffalo_sqft = decimal.Decimal(0)
+        buffalo_amount = decimal.Decimal(0)
+        # Initialize accumulators for NON-BUFFALO group ("2")
+        non_buffalo_pos = set()
+        non_buffalo_items = set()
+        non_buffalo_descriptions = set()
+        non_buffalo_sqft = decimal.Decimal(0)
+        non_buffalo_amount = decimal.Decimal(0)
 
-    logging.info(f"{prefix} FOB Compounding complete.")
-    return fob_compounded_result
+        logging.debug(f"{prefix} Processing {len(initial_results)} entries for BUFFALO split.")
+        for key, sums_dict in initial_results.items():
+             po_key_val, item_key_val, desc_key_val = None, None, None
+             try: # Extract PO, Item, Desc
+                 if aggregation_mode == 'standard' and len(key) == 4:
+                     po_key_val, item_key_val, _, desc_key_val = key
+                 elif aggregation_mode == 'custom' and len(key) == 4:
+                     po_key_val, item_key_val, _, desc_key_val = key
+                 else:
+                     if len(key) != 4: logging.warning(f"{prefix} Unexpected key length ({len(key)}) for key {key} in BUFFALO split mode. Trying heuristic.")
+                     if len(key) >= 2: po_key_val, item_key_val = key[0], key[1]
+                     if len(key) >= 4: desc_key_val = key[3]
+                     if po_key_val is None or item_key_val is None:
+                         logging.warning(f"{prefix} Cannot extract PO/Item/Desc reliably from key {key} in BUFFALO split mode. Skipping.")
+                         continue
+             except (ValueError, TypeError, IndexError) as e:
+                 logging.warning(f"{prefix} Error unpacking key {key} (BUFFALO split mode): {e}. Skipping.")
+                 continue
+
+             po_str = str(po_key_val) if po_key_val is not None else "<MISSING_PO>"
+             item_str = str(item_key_val) if item_key_val is not None else "<MISSING_ITEM>"
+             desc_str = str(desc_key_val).strip() if desc_key_val is not None else ""
+             is_buffalo = False
+             if desc_str and "BUFFALO" in desc_str.upper(): is_buffalo = True
+             sqft_sum = sums_dict.get('sqft_sum', decimal.Decimal(0))
+             amount_sum = sums_dict.get('amount_sum', decimal.Decimal(0))
+             if not isinstance(sqft_sum, decimal.Decimal): sqft_sum = decimal.Decimal(0)
+             if not isinstance(amount_sum, decimal.Decimal): amount_sum = decimal.Decimal(0)
+
+             if is_buffalo:
+                 buffalo_pos.add(po_str)
+                 buffalo_items.add(item_str)
+                 buffalo_descriptions.add(desc_str)
+                 buffalo_sqft += sqft_sum
+                 buffalo_amount += amount_sum
+             else:
+                 non_buffalo_pos.add(po_str)
+                 non_buffalo_items.add(item_str)
+                 if desc_str: non_buffalo_descriptions.add(desc_str)
+                 non_buffalo_sqft += sqft_sum
+                 non_buffalo_amount += amount_sum
+
+        logging.debug(f"{prefix} Finished processing entries for BUFFALO split.")
+
+        # Format BUFFALO Group ("1")
+        sorted_buffalo_pos = sorted(list(buffalo_pos))
+        sorted_buffalo_items = sorted(list(buffalo_items))
+        sorted_buffalo_descriptions = sorted([d for d in buffalo_descriptions if d])
+        buffalo_result: FobCompoundingResult = {
+            'combined_po': format_chunks(sorted_buffalo_pos, FOB_CHUNK_SIZE, FOB_INTRA_CHUNK_SEPARATOR, FOB_INTER_CHUNK_SEPARATOR),
+            'combined_item': format_chunks(sorted_buffalo_items, FOB_CHUNK_SIZE, FOB_INTRA_CHUNK_SEPARATOR, FOB_INTER_CHUNK_SEPARATOR),
+            'combined_description': format_chunks(sorted_buffalo_descriptions, 1, "", "\n"),
+            'total_sqft': buffalo_sqft,
+            'total_amount': buffalo_amount
+        }
+        # Format NON-BUFFALO Group ("2")
+        sorted_non_buffalo_pos = sorted(list(non_buffalo_pos))
+        sorted_non_buffalo_items = sorted(list(non_buffalo_items))
+        sorted_non_buffalo_descriptions = sorted([d for d in non_buffalo_descriptions if d])
+        non_buffalo_result: FobCompoundingResult = {
+            'combined_po': format_chunks(sorted_non_buffalo_pos, FOB_CHUNK_SIZE, FOB_INTRA_CHUNK_SEPARATOR, FOB_INTER_CHUNK_SEPARATOR),
+            'combined_item': format_chunks(sorted_non_buffalo_items, FOB_CHUNK_SIZE, FOB_INTRA_CHUNK_SEPARATOR, FOB_INTER_CHUNK_SEPARATOR),
+            'combined_description': format_chunks(sorted_non_buffalo_descriptions, 1, "", "\n"),
+            'total_sqft': non_buffalo_sqft,
+            'total_amount': non_buffalo_amount
+        }
+        # Construct Final Result Dictionary for BUFFALO Split Case
+        final_buffalo_split_result: FinalFobResultType = {
+            "1": buffalo_result,
+            "2": non_buffalo_result
+        }
+        logging.info(f"{prefix} BUFFALO split FOB Compounding complete.")
+        return final_buffalo_split_result
+        # --- End Path 1 (BUFFALO Split) --- #
+
+    else:
+        # --- Path 2: Descriptions are NOT present -> PO Count Split Aggregation ---
+        # Totals are calculated based on conceptual groups of 8 POs.
+        # Final string formatting uses chunk size 2.
+        PO_GROUPING_FOR_TOTALS = 8 # Define the size for grouping totals
+        logging.info(f"{prefix} No description data found. Performing PO count split aggregation.")
+        logging.info(f"{prefix}   - Totals calculated per group of {PO_GROUPING_FOR_TOTALS} POs.")
+        logging.info(f"{prefix}   - String formatting uses chunk size {FOB_CHUNK_SIZE} and separator '{FOB_INTRA_CHUNK_SEPARATOR}'.")
+
+        # Step 1: Aggregate data by PO
+        po_data_aggregation: Dict[str, Dict[str, Union[set, decimal.Decimal]]] = {}
+        logging.debug(f"{prefix} Pass 1: Aggregating SQFT/Amount/Items per PO.")
+        for key, sums_dict in initial_results.items():
+             po_key_val, item_key_val = None, None
+             try: # Extract PO/Item
+                 if len(key) >= 2: po_key_val, item_key_val = key[0], key[1]
+                 else: continue
+             except (TypeError, IndexError) as e: continue # Ignore errors in pass 1
+
+             po_str = str(po_key_val) if po_key_val is not None else "<MISSING_PO>"
+             item_str = str(item_key_val) if item_key_val is not None else "<MISSING_ITEM>"
+             sqft_sum = sums_dict.get('sqft_sum', decimal.Decimal(0))
+             amount_sum = sums_dict.get('amount_sum', decimal.Decimal(0))
+             if not isinstance(sqft_sum, decimal.Decimal): sqft_sum = decimal.Decimal(0)
+             if not isinstance(amount_sum, decimal.Decimal): amount_sum = decimal.Decimal(0)
+
+             if po_str not in po_data_aggregation:
+                 po_data_aggregation[po_str] = {'sqft_total': decimal.Decimal(0), 'amount_total': decimal.Decimal(0), 'items': set()}
+             po_data_aggregation[po_str]['sqft_total'] += sqft_sum # type: ignore
+             po_data_aggregation[po_str]['amount_total'] += amount_sum # type: ignore
+             po_data_aggregation[po_str]['items'].add(item_str) # type: ignore
+
+        if not po_data_aggregation:
+            logging.warning(f"{prefix} No valid PO data found for PO count splitting. Returning empty dict.")
+            return {}
+
+        # Step 2: Get sorted list of unique POs
+        sorted_pos = sorted(list(po_data_aggregation.keys()))
+
+        # Step 3: Iterate through POs in conceptual groups of 8 for total calculation
+        final_po_count_split_result: FinalFobResultType = {}
+        # Calculate number of output chunks based on the total grouping size
+        num_conceptual_chunks = (len(sorted_pos) + PO_GROUPING_FOR_TOTALS - 1) // PO_GROUPING_FOR_TOTALS
+
+        logging.debug(f"{prefix} Pass 2: Creating {num_conceptual_chunks} output chunks based on conceptual PO groups of {PO_GROUPING_FOR_TOTALS}.")
+
+        for i in range(num_conceptual_chunks):
+            # Determine the POs belonging to this conceptual chunk (for totals)
+            start_idx = i * PO_GROUPING_FOR_TOTALS
+            end_idx = start_idx + PO_GROUPING_FOR_TOTALS
+            conceptual_po_chunk = sorted_pos[start_idx:end_idx]
+
+            # Calculate totals and collect items for THIS conceptual chunk
+            chunk_sqft_total = decimal.Decimal(0)
+            chunk_amount_total = decimal.Decimal(0)
+            chunk_items = set()
+            po_list_for_formatting = [] # Collect POs in this chunk for formatting
+
+            for po_str in conceptual_po_chunk:
+                po_agg_data = po_data_aggregation.get(po_str)
+                if po_agg_data:
+                    chunk_sqft_total += po_agg_data.get('sqft_total', decimal.Decimal(0)) # type: ignore
+                    chunk_amount_total += po_agg_data.get('amount_total', decimal.Decimal(0)) # type: ignore
+                    chunk_items.update(po_agg_data.get('items', set())) # type: ignore
+                    po_list_for_formatting.append(po_str) # Add the PO itself to the list for formatting
+                else:
+                     logging.warning(f"{prefix} PO '{po_str}' not found in aggregation data during chunking.")
+
+            # Sort items collected for this chunk
+            sorted_chunk_items = sorted(list(chunk_items))
+
+            # Step 4: Format the collected POs and Items using desired format (size 2)
+            # --- Add Debugging --- 
+            logging.debug(f"{prefix} Chunk {i+1}: Formatting POs. Input list ({len(po_list_for_formatting)} items): {po_list_for_formatting}")
+            logging.debug(f"{prefix} Chunk {i+1}: PO Format Params: size={FOB_CHUNK_SIZE}, intra='{FOB_INTRA_CHUNK_SEPARATOR}', inter={repr(FOB_INTER_CHUNK_SEPARATOR)}")
+            # --- End Debugging --- 
+            formatted_po_chunk = format_chunks(po_list_for_formatting, FOB_CHUNK_SIZE, FOB_INTRA_CHUNK_SEPARATOR, FOB_INTER_CHUNK_SEPARATOR)
+            # --- Add Debugging --- 
+            logging.debug(f"{prefix} Chunk {i+1}: Formatted POs Result: {repr(formatted_po_chunk)}")
+            # --- End Debugging --- 
+
+            # --- Add Debugging --- 
+            logging.debug(f"{prefix} Chunk {i+1}: Formatting Items. Input list ({len(sorted_chunk_items)} items): {sorted_chunk_items}")
+            logging.debug(f"{prefix} Chunk {i+1}: Item Format Params: size={FOB_CHUNK_SIZE}, intra='{FOB_INTRA_CHUNK_SEPARATOR}', inter={repr(FOB_INTER_CHUNK_SEPARATOR)}")
+            # --- End Debugging --- 
+            formatted_item_chunk = format_chunks(sorted_chunk_items, FOB_CHUNK_SIZE, FOB_INTRA_CHUNK_SEPARATOR, FOB_INTER_CHUNK_SEPARATOR)
+            # --- Add Debugging --- 
+            logging.debug(f"{prefix} Chunk {i+1}: Formatted Items Result: {repr(formatted_item_chunk)}")
+            # --- End Debugging --- 
+
+            # Create the result dictionary for this chunk index
+            chunk_result: FobCompoundingResult = {
+                'combined_po': formatted_po_chunk,
+                'combined_item': formatted_item_chunk,
+                'combined_description': '', # No descriptions in this path
+                'total_sqft': chunk_sqft_total,    # Use CHUNK total (calculated based on group of 8)
+                'total_amount': chunk_amount_total # Use CHUNK total (calculated based on group of 8)
+            }
+            chunk_index_str = str(i + 1)
+            final_po_count_split_result[chunk_index_str] = chunk_result
+            logging.debug(f"{prefix} Created output chunk {chunk_index_str}: {len(conceptual_po_chunk)} POs contributed totals, SQFT={chunk_sqft_total}, Amount={chunk_amount_total}")
+
+        logging.info(f"{prefix} PO count split FOB Compounding complete ({len(final_po_count_split_result)} chunks created).")
+        return final_po_count_split_result
+        # --- End Path 2 (PO Count Split) --- #
 
 
 # --- >>> ADDED: Default JSON Serializer Function <<< ---
@@ -306,8 +433,8 @@ def run_invoice_automation(input_excel_override: Optional[str] = None, output_di
     # Global dictionaries for initial aggregation results
     global_standard_aggregation_results: Dict[Tuple[Any, Any, Optional[decimal.Decimal], Optional[str]], Dict[str, decimal.Decimal]] = {}
     global_custom_aggregation_results: Dict[Tuple[Any, Any, Optional[str], None], Dict[str, decimal.Decimal]] = {}
-    # Global variable for the final single FOB compounded result
-    global_fob_compounded_result: Optional[FobCompoundingResult] = None
+    # Global variable for the final FOB compounded result -> Type updated
+    global_fob_compounded_result: Optional[FinalFobResultType] = None
 
     aggregation_mode_used = "standard" # Default, determines WHICH aggregation feeds FOB
 
@@ -474,29 +601,35 @@ def run_invoice_automation(input_excel_override: Optional[str] = None, output_di
             logging.debug(f"--- Full Global CUSTOM Aggregation Results ---\n{log_str_cust}")
 
 
-        # --- Log Final FOB Compounded Result (INFO Level) - REFINED --- #
+        # --- Log Final FOB Compounded Result (INFO Level) - Simplified to expect split result --- #
         logging.info(f"--- Final FOB Compounded Result (Workbook: '{input_filename}', Based on '{aggregation_mode_used.upper()}' Input) ---")
-        if global_fob_compounded_result is not None:
-            po_string_value = global_fob_compounded_result.get('combined_po', '<Not Found>')
-            item_string_value = global_fob_compounded_result.get('combined_item', '<Not Found>')
-            total_sqft_value = global_fob_compounded_result.get('total_sqft', 'N/A')
-            total_amount_value = global_fob_compounded_result.get('total_amount', 'N/A')
+        if global_fob_compounded_result is not None and isinstance(global_fob_compounded_result, dict) and "1" in global_fob_compounded_result:
+            # Assume it's the BUFFALO split result ("1" and "2")
+            logging.info(f"FOB result is split into BUFFALO (1) and NON-BUFFALO (2) groups.")
+            for chunk_index, chunk_data in sorted(global_fob_compounded_result.items()):
+                logging.info(f"--- FOB Group {chunk_index} --- ")
+                if chunk_data and isinstance(chunk_data, dict):
+                    po_string_value = chunk_data.get('combined_po', '<Not Found>')
+                    item_string_value = chunk_data.get('combined_item', '<Not Found>')
+                    desc_string_value = chunk_data.get('combined_description', '<Not Found>')
+                    total_sqft_value = chunk_data.get('total_sqft', 'N/A')
+                    total_amount_value = chunk_data.get('total_amount', 'N/A')
 
-            logging.info(f"Combined POs (Type: {type(po_string_value)}):")
-            logging.info(f"  repr(): {repr(po_string_value)}")
-            logging.info(f"  Raw Value:\n{po_string_value}")
+                    logging.info(f"  Combined POs:\n{po_string_value}")
+                    logging.info(f"  Combined Items:\n{item_string_value}")
+                    logging.info(f"  Combined Descriptions:\n{desc_string_value}")
+                    logging.info(f"  Total SQFT: {total_sqft_value} (Type: {type(total_sqft_value)})")
+                    logging.info(f"  Total Amount: {total_amount_value} (Type: {type(total_amount_value)})")
+                else:
+                    logging.info(f"  Group {chunk_index} data not found or invalid.")
             logging.info("-" * 30)
 
-            logging.info(f"Combined Items (Type: {type(item_string_value)}):")
-            logging.info(f"  repr(): {repr(item_string_value)}")
-            logging.info(f"  Raw Value:\n{item_string_value}")
-            logging.info("-" * 30)
-
-            logging.info(f"Total SQFT: {total_sqft_value} (Type: {type(total_sqft_value)})")
-            logging.info(f"Total Amount: {total_amount_value} (Type: {type(total_amount_value)})")
-            logging.info("-" * 30)
+        elif global_fob_compounded_result is None:
+            logging.error("FOB Compounding result is None or was not set.")
         else:
-            logging.error("FOB Compounding result is None or was not set, potentially due to an error during compounding.")
+            # Handle unexpected type if necessary (e.g., empty dict if input was empty and aggregation failed)
+             logging.warning(f"FOB Compounding result has unexpected structure/type: {type(global_fob_compounded_result)}")
+
         # --- End Final Logging ---
 
 
