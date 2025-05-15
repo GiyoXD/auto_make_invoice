@@ -43,7 +43,7 @@ MAX_LOG_DICT_LEN = 3000 # Max length for printing large dicts in logs (for DEBUG
 
 # --- Constants for FOB Compounding Formatting ---
 FOB_CHUNK_SIZE = 2  # How many items per group (e.g., PO1\\PO2)
-FOB_INTRA_CHUNK_SEPARATOR = "\\"  # Separator within a group (e.g., DOUBLE BACKSLASH)
+FOB_INTRA_CHUNK_SEPARATOR = "/"  # Separator within a group (e.g., DOUBLE BACKSLASH)
 FOB_INTER_CHUNK_SEPARATOR = "\n"  # Separator between groups (e.g., newline)
 
 # Type alias for the two possible initial aggregation structures
@@ -225,7 +225,7 @@ def perform_fob_compounding(
         # --- Path 2: Descriptions are NOT present -> PO Count Split Aggregation ---
         # Totals are calculated based on conceptual groups of 8 POs.
         # Final string formatting uses chunk size 2.
-        PO_GROUPING_FOR_TOTALS = 8 # Define the size for grouping totals
+        PO_GROUPING_FOR_TOTALS = 5 # Define the size for grouping totals
         logging.info(f"{prefix} No description data found. Performing PO count split aggregation.")
         logging.info(f"{prefix}   - Totals calculated per group of {PO_GROUPING_FOR_TOTALS} POs.")
         logging.info(f"{prefix}   - String formatting uses chunk size {FOB_CHUNK_SIZE} and separator '{FOB_INTRA_CHUNK_SEPARATOR}'.")

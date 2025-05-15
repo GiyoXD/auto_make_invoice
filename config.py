@@ -37,6 +37,7 @@ TARGET_HEADERS_MAP = {
     "inv_ref": ["ref", "invoice ref", "ref no"],
 
     # --- Other Found Headers ---
+    "dc": ["批次号", "DC", "dc"],
     "batch_no": ["batch number", "批次号"],  # Primary English: 'batch number', Primary Chinese: '批次号'
     "line_no": ["line no", "行号"],           # Primary English: 'line no', Primary Chinese: '行号'
     "direction": ["direction", "内向"],      # Primary English: 'direction', Primary Chinese: '内向' (Meaning still unclear)
